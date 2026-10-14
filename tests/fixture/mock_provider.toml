@@ -1,0 +1,4 @@
+[nvidia]
+api_key = "nvapi-mock123"
+model = "meta/llama-3.3-70b-instruct"
+base_url = "http://127.0.0.1:18700/v1"

@@ -1,0 +1,10 @@
+# Night Crawler — NVIDIA NIM provider config
+# Give this file to the setup wizard (paste its path), or use --provider-config.
+# Everything except the key is optional.
+
+[nvidia]
+api_key = "nvapi-YOUR-KEY-HERE"
+# Optional: preselected in the model list after connecting
+model = "meta/llama-3.3-70b-instruct"
+# Optional: any OpenAI-compatible endpoint
+base_url = "https://integrate.api.nvidia.com/v1"
