@@ -12,6 +12,12 @@ pub struct NvClient {
     pub model: String,
 }
 
+/// A verified model choice from `connect_and_select`.
+pub struct Selected {
+    pub model: String,
+    pub note: String,
+}
+
 /// Pull the assistant text out of an OpenAI/NIM completion message.
 /// Modern reasoning models (GLM, GPT-OSS, Nemotron reasoning variants) put
 /// their thinking into `reasoning_content` and may leave `content` null —
@@ -78,18 +84,18 @@ impl NvClient {
     /// List models, then find one that actually completes a chat (the account
     /// may only have access to some families; listed models may be EOL).
     /// Updates `self.model` to the verified working model.
-    /// Returns (full model list, verification note).
+    /// Returns (full model list, selected model + verification note).
     pub async fn connect_and_select(
         &mut self,
         preferred: Option<String>,
-    ) -> Result<(Vec<String>, String)> {
+    ) -> Result<(Vec<String>, Selected)> {
         let models = self.list_models().await?;
         let (model, note) = self
             .auto_select(&models, preferred.clone())
             .await
             .map_err(|e| anyhow!("models listed ({}) but none usable: {}", models.len(), e))?;
-        self.model = model;
-        Ok((models, note))
+        self.model = model.clone();
+        Ok((models, Selected { model, note }))
     }
 
     /// Try the preferred model first, then ranked candidates from the list,

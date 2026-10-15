@@ -528,3 +528,48 @@ base_url = "https://integrate.api.nvidia.com/v1"
         assert!(resolve_provider_input("/definitely/not/a/real/path.toml").is_err());
     }
 }
+
+// ---------------------------------------------------------------------------
+// Saved provider: persist the verified key/model once so later runs only
+// ask for the target. ~/.config/nightcrawler/provider.toml
+// ---------------------------------------------------------------------------
+
+pub fn saved_provider_path() -> PathBuf {
+    if let Ok(home) = std::env::var("HOME") {
+        PathBuf::from(home)
+            .join(".config")
+            .join("nightcrawler")
+            .join("provider.toml")
+    } else {
+        PathBuf::from("provider.toml")
+    }
+}
+
+/// The provider the user saved on a previous run (provider.toml).
+pub fn load_saved_provider() -> Option<ProviderSetup> {
+    let path = saved_provider_path();
+    if !path.exists() {
+        return None;
+    }
+    resolve_provider_input(&path.to_string_lossy()).ok()
+}
+
+/// Persist a verified provider setup for subsequent launches.
+pub fn save_provider(setup: &ProviderSetup) -> Result<()> {
+    let path = saved_provider_path();
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    // always quote: bare TOML strings cannot contain '/','-' joined ids like
+    // "z-ai/glm-5.3" would break parsing
+    let esc = |s: &str| format!("{:?}", s);
+    let content = format!(
+        "# Saved by Night Crawler — verified provider. Delete this file or run with --setup to change it.\n[nvidia]\napi_key = {}\nmodel = {}\nbase_url = {}\n",
+        esc(&setup.api_key),
+        setup.model.as_deref().map(esc).unwrap_or_else(|| "\"\"".into()),
+        esc(&setup.base_url),
+    );
+    std::fs::write(&path, content)
+        .with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
+}

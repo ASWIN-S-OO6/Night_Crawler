@@ -79,6 +79,10 @@ struct Cli {
     /// List models available for the given API key and exit
     #[arg(long)]
     list_models: bool,
+
+    /// Force the setup wizard: re-enter the provider key and model
+    #[arg(long)]
+    setup: bool,
 }
 
 fn read_wordlist(p: Option<&PathBuf>) -> Option<Vec<String>> {
@@ -122,7 +126,7 @@ fn main() -> Result<()> {
         (None, false, true) => {
             // interactive wizard
             let mut tui = ui::init()?;
-            let outcome = ui_setup::run_setup(&mut tui.terminal, &rt, &cfg);
+            let outcome = ui_setup::run_setup(&mut tui.terminal, &rt, &cfg, cli.setup);
             ui::restore();
             match outcome? {
                 Some(o) => (o.target, o.nv, o.provider_desc),
@@ -203,8 +207,8 @@ async fn build_cli_ai(cli: &Cli, cfg: &config::Config) -> Option<ai::NvClient> {
     // find a model that actually works with this key (preferred first,
     // then auto-selected from the account's list)
     match client.connect_and_select(setup.model.clone()).await {
-        Ok((_, note)) => {
-            eprintln!("\x1b[1;32m[*] {}\x1b[0m", note);
+        Ok((_, sel)) => {
+            eprintln!("\x1b[1;32m[*] {}\x1b[0m", sel.note);
             Some(client)
         }
         Err(e) => {

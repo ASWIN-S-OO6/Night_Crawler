@@ -1,0 +1,376 @@
+{
+  "meta": {
+    "tool": "Night Crawler",
+    "version": "0.1.0",
+    "target_input": "127.0.0.1",
+    "started_at": "2026-10-15 10:56:24",
+    "finished_at": "2026-10-15 10:56:24",
+    "duration_secs": 140
+  },
+  "target": {
+    "input_kind": "ip",
+    "input": "127.0.0.1",
+    "ip": "127.0.0.1",
+    "hostname": null,
+    "reverse_dns": "localhost",
+    "inferred_domain": null,
+    "alive": true,
+    "liveness_method": "icmp",
+    "rtt_ms": 0.012,
+    "ptr_domains": [
+      "localhost"
+    ],
+    "cert_domains": []
+  },
+  "ports": [
+    {
+      "port": 8000,
+      "proto": "tcp",
+      "open": true,
+      "service": "http",
+      "banner": "Server: SimpleHTTP/0.6 Python/3.12.3 | Title: NC Test Page",
+      "product": null,
+      "version": null,
+      "http": {
+        "url": "http://127.0.0.1:8000",
+        "status": 200,
+        "title": "NC Test Page",
+        "server": "SimpleHTTP/0.6 Python/3.12.3",
+        "powered_by": null,
+        "headers": [
+          [
+            "server",
+            "SimpleHTTP/0.6 Python/3.12.3"
+          ],
+          [
+            "date",
+            "Thu, 15 Oct 2026 05:24:06 GMT"
+          ],
+          [
+            "content-type",
+            "text/html"
+          ],
+          [
+            "content-length",
+            "40"
+          ],
+          [
+            "last-modified",
+            "Thu, 15 Oct 2026 05:21:30 GMT"
+          ]
+        ],
+        "cookies": [],
+        "robots_disallow": [],
+        "security_headers": [
+          [
+            "Strict-Transport-Security",
+            false
+          ],
+          [
+            "Content-Security-Policy",
+            false
+          ],
+          [
+            "X-Frame-Options",
+            false
+          ],
+          [
+            "X-Content-Type-Options",
+            false
+          ],
+          [
+            "X-XSS-Protection",
+            false
+          ]
+        ],
+        "tls_issuer": null,
+        "tls_subject": null,
+        "tls_valid_until": null,
+        "tls_san": []
+      },
+      "notes": []
+    },
+    {
+      "port": 9999,
+      "proto": "tcp",
+      "open": true,
+      "service": "ftp",
+      "banner": "220 ProFTPD 1.3.5 Server",
+      "product": "ProFTPD",
+      "version": "1.3.5",
+      "http": null,
+      "notes": []
+    }
+  ],
+  "vulns": [
+    {
+      "title": "ProFTPD 1.3.5 mod_copy remote code execution",
+      "severity": "High",
+      "confidence": "LIKELY",
+      "cve": "CVE-2015-3306",
+      "affected": "127.0.0.1:9999/tcp ftp",
+      "evidence": "banner: 220 ProFTPD 1.3.5 Server",
+      "description": "ProFTPD 1.3.5 before 1.3.5a allows unauthenticated copying of files via SITE CPFR/CPTO commands, leading to RCE.",
+      "reference": "https://nvd.nist.gov/vuln/detail/CVE-2015-3306"
+    }
+  ],
+  "dns": null,
+  "subdomains": [],
+  "subdirs": [
+    {
+      "url": "http://127.0.0.1:8000/index.html",
+      "status": 200,
+      "length": 40,
+      "title": "NC Test Page",
+      "note": "found (200)"
+    }
+  ],
+  "http": [
+    {
+      "url": "http://127.0.0.1:8000",
+      "status": 200,
+      "title": "NC Test Page",
+      "server": "SimpleHTTP/0.6 Python/3.12.3",
+      "powered_by": null,
+      "headers": [
+        [
+          "server",
+          "SimpleHTTP/0.6 Python/3.12.3"
+        ],
+        [
+          "date",
+          "Thu, 15 Oct 2026 05:24:06 GMT"
+        ],
+        [
+          "content-type",
+          "text/html"
+        ],
+        [
+          "content-length",
+          "40"
+        ],
+        [
+          "last-modified",
+          "Thu, 15 Oct 2026 05:21:30 GMT"
+        ]
+      ],
+      "cookies": [],
+      "robots_disallow": [],
+      "security_headers": [
+        [
+          "Strict-Transport-Security",
+          false
+        ],
+        [
+          "Content-Security-Policy",
+          false
+        ],
+        [
+          "X-Frame-Options",
+          false
+        ],
+        [
+          "X-Content-Type-Options",
+          false
+        ],
+        [
+          "X-XSS-Protection",
+          false
+        ]
+      ],
+      "tls_issuer": null,
+      "tls_subject": null,
+      "tls_valid_until": null,
+      "tls_san": []
+    }
+  ],
+  "snmp": null,
+  "ldap": null,
+  "netbios": null,
+  "smb": null,
+  "whois": {
+    "server": "whois.iana.org",
+    "registrar": null,
+    "created": null,
+    "expires": null,
+    "org": null,
+    "abuse_email": null,
+    "raw": "--- via whois.iana.org ---\n% IANA WHOIS server\n% for more information on IANA, visit http://www.iana.org\n% This query returned 1 object\n\ninetnum:      127.0.0.0 - 127.255.255.255\norganisation: IANA - Loopback\nstatus:       RESERVED\n\nremarks:      127.0.0.0/8 reserved for Loopback [RFC1122].Reserved by\nremarks:      protocol. For authoritative registration,\nremarks:      seeiana-ipv4-special-registry.\n\nchanged:      1981-09\nsource:       IANA"
+  },
+  "dorks": [],
+  "graph": {
+    "nodes": [
+      {
+        "id": 0,
+        "kind": "ip",
+        "label": "127.0.0.1"
+      },
+      {
+        "id": 1,
+        "kind": "domain",
+        "label": "127.0.0.1"
+      },
+      {
+        "id": 2,
+        "kind": "service",
+        "label": "8000:http-alt"
+      },
+      {
+        "id": 3,
+        "kind": "service",
+        "label": "9999:unknown"
+      },
+      {
+        "id": 4,
+        "kind": "url",
+        "label": "http://127.0.0.1:8000/index.html"
+      },
+      {
+        "id": 5,
+        "kind": "url",
+        "label": "http://127.0.0.1:8000"
+      }
+    ],
+    "edges": [
+      {
+        "from": 0,
+        "to": 1,
+        "label": "resolves-to"
+      },
+      {
+        "from": 0,
+        "to": 2,
+        "label": "exposes"
+      },
+      {
+        "from": 0,
+        "to": 3,
+        "label": "exposes"
+      },
+      {
+        "from": 4,
+        "to": 5,
+        "label": "discovered-under"
+      }
+    ]
+  },
+  "ai_plan": {
+    "modules": [
+      "snmp",
+      "subdirs"
+    ],
+    "rationale": "Web and legacy services detected; SNMP probe is harmless.",
+    "priorities": [
+      "verify ftp banner",
+      "check web paths"
+    ],
+    "model": "meta/llama-3.3-70b-instruct"
+  },
+  "ai_report": "## Executive Summary\n\n- 3 open services with one likely exploitable version (ProFTPD 1.3.5 mod_copy).\n\n## Attack Paths\n\n1. FTP foothold: connect to 9999, exploit ProFTPD 1.3.5 mod_copy (SITE CPFR/CPTO) to stage a webshell.",
+  "ai_model": "meta/llama-3.3-70b-instruct",
+  "ai_decisions": [
+    {
+      "stage": "port-strategy",
+      "decision": "ports=8000,9999,31337",
+      "rationale": "focused sweep of live test services"
+    },
+    {
+      "stage": "module-plan",
+      "decision": "[snmp, subdirs]",
+      "rationale": "Web and legacy services detected; SNMP probe is harmless."
+    },
+    {
+      "stage": "follow-up-1",
+      "decision": "[extend_dirs, finish]",
+      "rationale": "confirm reachable content under the web root"
+    }
+  ],
+  "pivots": [],
+  "module_log": [],
+  "phases": [
+    [
+      "Resolve Target",
+      "done: 127.0.0.1 -> 127.0.0.1"
+    ],
+    [
+      "Host Liveness",
+      "done: up (icmp) rtt 0.0ms"
+    ],
+    [
+      "NightCrawler Port Strategy",
+      "done: ports=8000,9999,31337"
+    ],
+    [
+      "Port Scan",
+      "done: 2 open / 3 scanned"
+    ],
+    [
+      "Service & Version Detection",
+      "done: 2 services fingerprinted"
+    ],
+    [
+      "Vulnerability Fingerprinting",
+      "done: 1 potential issues"
+    ],
+    [
+      "NightCrawler Planning",
+      "done: chose 2 modules"
+    ],
+    [
+      "DNS Recon",
+      "skipped: no domain"
+    ],
+    [
+      "Zone Transfer (AXFR)",
+      "skipped: no domain"
+    ],
+    [
+      "Subdomain Enumeration",
+      "skipped: no domain"
+    ],
+    [
+      "Web & Directory Discovery",
+      "done: 1 paths found"
+    ],
+    [
+      "SNMP Enumeration",
+      "skipped: no community accepted"
+    ],
+    [
+      "LDAP Enumeration",
+      "skipped: no LDAP service"
+    ],
+    [
+      "NetBIOS / SMB Enumeration",
+      "skipped: no SMB/NetBIOS service"
+    ],
+    [
+      "WHOIS",
+      "done: netblock org: ?"
+    ],
+    [
+      "OSINT Dorking",
+      "skipped: no domain"
+    ],
+    [
+      "NightCrawler Follow-up",
+      "done: model chose finish"
+    ],
+    [
+      "Pivot Domains",
+      "skipped: none selected by AI"
+    ],
+    [
+      "Link Analysis",
+      "done: 6 nodes / 4 edges"
+    ],
+    [
+      "NightCrawler Analysis & Report",
+      "pending"
+    ],
+    [
+      "Final Report",
+      "pending"
+    ]
+  ]
+}
