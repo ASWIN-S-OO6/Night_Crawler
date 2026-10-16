@@ -50,7 +50,7 @@ cargo build --release
 | 3. Port scan | Async TCP connect scan with live progress gauge |
 | 4. Fingerprinting | Banner grabbing, product/version extraction (SSH, Apache, nginx, ProFTPD, MySQL, IIS, …) |
 | 5. Vulnerability matching | Local CVE database with **CONFIRMED / LIKELY / POSSIBLE** confidence levels (doctrine §5) |
-| 6. CVE search | Online CVE/exploit mapping via your **Google Programmable Search Engine** (`cx e724058a30fea47fa`) |
+| 6. CVE mapping | **OpenVAS/Greenbone-style engine**: product→CPE identification → NVD CVE database query → client-side version-range verification → CVSS-ranked results; keyword + CIRCL fallbacks, plus Google CSE (`cx e724058a30fea47fa`) exploit references |
 | 7. Planning | The model selects which modules run (SNMP/LDAP/SMB/dirs/subdomains/dorking) |
 | 8. Recon modules | DNS + AXFR zone transfer, subdomains (crt.sh + brute), web directories, SNMP walk, LDAP, NetBIOS/SMB, WHOIS, dorking |
 | 9. Follow-up | The model reviews **combined evidence** and chains extra tasks: `extend_dirs`, `probe_web_roots`, `pivot_domains`, `rescan_ports` — up to 3 rounds, bounded & validated |
@@ -94,6 +94,8 @@ export GOOGLE_CSE_KEY="your-google-api-key"     # free: 100 queries/day
 
 - Engine ID is built in: `cx = e724058a30fea47fa` (override with
   `google_cse_cx` in `nightcrawler.toml` if you build your own).
+- The CSE layer adds exploit-DB style references on top of the NVD engine —
+  CVE identification itself runs against the NVD database (no key needed).
 - Without a key, dorking falls back to DuckDuckGo and CVE mapping is
   skipped (noted in the report).
 - Create a key at
@@ -207,6 +209,9 @@ Night Crawler/
 │       │                     extraction, service refinement from products.
 │       ├── tls_capture.rs    rustls no-verify client: captures the peer certificate,
 │       │                     x509-parser SAN/CN/issuer/expiry → IP→domain pivots.
+│       ├── cve.rs            OpenVAS-style CVE engine: product→CPE table, NVD API 2.0
+│       │                     queries, client-side version-range verification, CVSS
+│       │                     extraction, CIRCL mirror fallback.
 │       ├── vulns.rs          Local CVE fingerprint database (vsftpd backdoor, ProFTPD
 │       │                     mod_copy, regreSSHion, Heartbleed, Exim RCE, IIS 6.0
 │       │                     WebDAV, Samba EternalRed, Jenkins CLI, MySQL auth bypass,

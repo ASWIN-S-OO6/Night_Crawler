@@ -42,6 +42,13 @@ pub struct Phase {
 }
 
 #[derive(Debug, Clone)]
+pub struct AgentTask {
+    pub name: String,
+    pub status: PhaseStatus,
+    pub note: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct Finding {
     pub severity: Severity,
     pub category: String,
@@ -67,6 +74,8 @@ pub struct AppState {
     pub report_path: Option<String>,
     pub ai_note: Option<String>,
     pub ai_thinking: bool,
+    pub agent_reasoning: Vec<String>,
+    pub agent_tasks: Vec<AgentTask>,
     pub next_finding_rev: u64,
 }
 
@@ -79,7 +88,7 @@ impl AppState {
             "Port Scan",
             "Service & Version Detection",
             "Vulnerability Fingerprinting",
-            "CVE Search (Google CSE)",
+            "CVE Mapping (NVD + CSE)",
             "NightCrawler Planning",
             "DNS Recon",
             "Zone Transfer (AXFR)",
@@ -117,6 +126,8 @@ impl AppState {
             report_path: None,
             ai_note: None,
             ai_thinking: false,
+            agent_reasoning: Vec::new(),
+            agent_tasks: Vec::new(),
             next_finding_rev: 0,
         }
     }
@@ -231,6 +242,38 @@ impl SharedState {
     pub fn thinking(&self, on: bool) {
         self.with(|s| {
             s.ai_thinking = on;
+        });
+    }
+
+    /// Push an agent reasoning line ("Deciding port strategy — host looks like …").
+    pub fn agent_reason(&self, line: &str) {
+        self.with(|s| {
+            s.agent_reasoning.push(line.to_string());
+            if s.agent_reasoning.len() > 30 {
+                s.agent_reasoning.remove(0);
+            }
+        });
+    }
+
+    /// Replace the agent's task queue (what it decided to run and why).
+    pub fn agent_tasks(&self, tasks: Vec<(String, String)>) {
+        self.with(|s| {
+            s.agent_tasks = tasks
+                .into_iter()
+                .map(|(name, note)| AgentTask {
+                    name,
+                    status: PhaseStatus::Pending,
+                    note,
+                })
+                .collect();
+        });
+    }
+
+    pub fn agent_task_status(&self, name: &str, status: PhaseStatus) {
+        self.with(|s| {
+            if let Some(t) = s.agent_tasks.iter_mut().find(|t| t.name == name) {
+                t.status = status;
+            }
         });
     }
 }

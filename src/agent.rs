@@ -170,7 +170,9 @@ JSON shape: {\"actions\": [...], \"reason\": \"<= 25 words\"}";
 // ---------------------------------------------------------------------------
 
 pub async fn analyze_report(client: &NvClient, results_json: &str, target: &str) -> Result<String> {
-    let task = "Write the final assessment report following the doctrine's REPORTING format EXACTLY, with these sections in this order:
+    let task = "Write the final assessment. This is NOT a tool-output dump — synthesize, correlate and chain the evidence like a professional attacker planning the engagement. Every section must interpret the data, not repeat it.
+
+Follow the doctrine's REPORTING format EXACTLY, with these sections in this order:
 
 ## Executive Summary
 ## Scope
@@ -198,7 +200,9 @@ Attack Paths must be chained, ordered narratives — where the problem is, how t
 
 Exploitation Recommendations is the operator's action list: ordered, concrete suggestions for exploiting the target based on the results — for each, give the exact tool or command to run, what it validates, and the scan evidence that justifies trying it. Never leave this section generic: every recommendation must reference a specific finding.
 
-Use ONLY the evidence provided — never invent ports, versions, CVEs, or hosts. Mark anything inferred as UNCONFIRMED. Be concrete and technical.";
+Use ONLY the evidence provided — never invent ports, versions, CVEs, or hosts. Where the data includes NVD CVE matches, treat them as the authoritative CVE list and reference their IDs and CVSS scores. Mark anything inferred as UNCONFIRMED. Be concrete and technical.
+
+In Exploitation Recommendations, walk the operator through compromising the target step by step: ordered steps, each with the exact command to run and what a successful result looks like. Assume Kali-class tooling is installed.";
 
     let user = format!(
         "TARGET: {}\n\nFULL RECON RESULTS (JSON):\n{}\n\nWrite the report now.",

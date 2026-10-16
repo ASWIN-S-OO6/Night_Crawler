@@ -1,3 +1,4 @@
+pub mod cve;
 pub mod banner;
 pub mod dnsrecon;
 pub mod dork;

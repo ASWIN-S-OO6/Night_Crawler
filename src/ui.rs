@@ -173,21 +173,127 @@ fn draw_header(f: &mut Frame, s: &AppState, area: Rect, elapsed: u64) {
 
 fn draw_main(f: &mut Frame, s: &AppState, area: Rect, findings_scroll: usize, log_scroll: usize, focus_logs: bool) {
     let cols = Layout::horizontal([
-        Constraint::Percentage(34),
-        Constraint::Percentage(66),
+        Constraint::Percentage(26), // phases
+        Constraint::Percentage(36), // NightCrawler agent brain
+        Constraint::Percentage(38), // findings + log
     ])
     .split(area);
 
     draw_phases(f, s, cols[0]);
+    draw_agent(f, s, cols[1]);
 
     let right = Layout::vertical([
         Constraint::Percentage(62),
         Constraint::Percentage(38),
     ])
-    .split(cols[1]);
+    .split(cols[2]);
 
     draw_findings(f, s, right[0], findings_scroll, focus_logs);
     draw_logs(f, s, right[1], log_scroll, focus_logs);
+}
+
+fn frame_now() -> usize {
+    (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        / 120) as usize
+        % SPINNER.len()
+}
+
+/// The agent brain panel: identity, live state, task queue, reasoning feed.
+fn draw_agent(f: &mut Frame, s: &AppState, area: Rect) {
+    let block = Block::default()
+        .title(" 🕷 NIGHTCRAWLER ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::LightMagenta));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let rows = Layout::vertical([
+        Constraint::Length(1), // identity + state
+        Constraint::Length(1), // divider
+        Constraint::Min(0),    // tasks + reasoning
+    ])
+    .split(inner);
+
+    let (state_icon, state_text, state_color) = if s.ai_thinking {
+        (
+            SPINNER[frame_now()],
+            "reasoning over the evidence…",
+            Color::LightMagenta,
+        )
+    } else if s.done {
+        ("✔", "assessment complete", Color::LightGreen)
+    } else {
+        ("▶", "acting", Color::LightGreen)
+    };
+    let identity = Line::from(vec![
+        Span::styled(
+            s.ai_note.clone().unwrap_or_else(|| "🕷 NightCrawler".into()),
+            Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("  │ ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("{} {}", state_icon, state_text),
+            Style::default().fg(state_color),
+        ),
+    ]);
+    f.render_widget(Paragraph::new(identity), rows[0]);
+
+    let div = "─".repeat(area.width.saturating_sub(2) as usize);
+    f.render_widget(
+        Paragraph::new(Line::from(Span::styled(div, Style::default().fg(Color::DarkGray)))),
+        rows[1],
+    );
+
+    let mut lines: Vec<Line> = Vec::new();
+    if !s.agent_tasks.is_empty() {
+        lines.push(Line::from(Span::styled(
+            " TASKS",
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        )));
+        for t in s.agent_tasks.iter().take(7) {
+            let (icon, style) = match t.status {
+                PhaseStatus::Pending => ("◌", Style::default().fg(Color::DarkGray)),
+                PhaseStatus::Running => (
+                    SPINNER[frame_now()],
+                    Style::default().fg(Color::LightMagenta).add_modifier(Modifier::BOLD),
+                ),
+                PhaseStatus::Done => ("✔", Style::default().fg(Color::LightGreen)),
+                PhaseStatus::Skipped(_) => ("–", Style::default().fg(Color::DarkGray)),
+                PhaseStatus::Failed(_) => ("✖", Style::default().fg(Color::Red)),
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {} ", icon), style),
+                Span::styled(t.name.clone(), style),
+            ]));
+        }
+        lines.push(Line::from(""));
+    }
+    if !s.agent_reasoning.is_empty() {
+        lines.push(Line::from(Span::styled(
+            " REASONING",
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        )));
+        let start = s.agent_reasoning.len().saturating_sub(8);
+        for r in s.agent_reasoning.iter().skip(start) {
+            lines.push(Line::from(vec![
+                Span::styled(" » ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    trunc(r, (area.width as usize).saturating_sub(4)),
+                    Style::default().fg(Color::Gray),
+                ),
+            ]));
+        }
+    }
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled(
+            " the agent narrates its decisions here",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), rows[2]);
 }
 
 fn draw_phases(f: &mut Frame, s: &AppState, area: Rect) {

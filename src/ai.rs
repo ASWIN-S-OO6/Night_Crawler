@@ -310,7 +310,7 @@ fn candidates(models: &[String], preferred: Option<String>) -> Vec<String> {
         else if l.contains("glm") { s += 120; }
         if l.contains("gemma-4") { s += 105; }
         else if l.contains("gemma-3") { s += 95; }
-        if l.contains("nemotron") && (l.contains("super") || l.contains("lightning")) { s += 90; }
+        if l.contains("nemotron") && (l.contains("super") || l.contains("lightning")) { s += 100; }
         else if l.contains("nemotron") && l.contains("instruct") { s += 75; }
         if l.contains("kimi") { s += 80; }
         if l.contains("gpt-oss") { s += 78; }
@@ -339,7 +339,7 @@ fn candidates(models: &[String], preferred: Option<String>) -> Vec<String> {
         .collect();
     ranked.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
 
-    for (_, m) in ranked.into_iter().take(8) {
+    for (_, m) in ranked.into_iter().take(12) {
         out.push(m);
     }
     out

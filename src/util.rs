@@ -97,3 +97,11 @@ pub fn safe_dir_name(s: &str) -> String {
         .replace('/', "_")
         .replace('.', "_")
 }
+
+pub fn truncate_chars(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        s.to_string()
+    } else {
+        s.chars().take(n).collect::<String>() + "…"
+    }
+}

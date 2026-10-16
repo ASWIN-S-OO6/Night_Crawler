@@ -308,6 +308,10 @@ pub async fn run_scan(
             match decision {
                 Ok(Ok(ps)) => {
                     ports_spec = Some(ps.ports.clone());
+                    shared.agent_reason(&format!(
+                        "Port strategy → {} · because: {}",
+                        ps.ports, ps.reason
+                    ));
                     shared.finding(
                         Severity::Info,
                         "nc",
@@ -478,6 +482,8 @@ pub async fn run_scan(
         }
     }
 
+    let mut results_cves: Vec<CveEntry> = Vec::new();
+
     // ------------------------------------------------------------------
     // Phase 6: Vulnerability fingerprinting
     // ------------------------------------------------------------------
@@ -492,7 +498,8 @@ pub async fn run_scan(
     );
 
     // ------------------------------------------------------------------
-    // Phase 6b: CVE mapping via the Google Programmable Search Engine
+    // Phase 6b: CVE mapping — NVD (the engine OpenVAS/Greenbone matches
+    // against) + Google CSE exploit references
     // ------------------------------------------------------------------
     let mut cve_refs: Vec<DorkResult> = Vec::new();
     {
@@ -507,35 +514,65 @@ pub async fn run_scan(
             }
         }
         products.truncate(10);
+
         if products.is_empty() {
-            shared.skipped("CVE Search (Google CSE)", "no products fingerprinted");
-        } else if crate::config::resolve_cse_key(cfg).is_none() {
-            shared.skipped(
-                "CVE Search (Google CSE)",
-                "no GOOGLE_CSE_KEY — set it to enable online CVE mapping",
-            );
+            shared.skipped("CVE Mapping (NVD + CSE)", "no products fingerprinted");
         } else {
-            shared.running("CVE Search (Google CSE)");
-            let refs = modules::dork::run_cve_search(&products, cfg, 6).await;
-            let mut hits = 0usize;
-            for r in &refs {
-                hits += r.results.len();
-                if let Some(e) = &r.error {
-                    shared.log(format!("cve search '{}': {}", r.query, e));
-                } else if !r.results.is_empty() {
-                    shared.finding(
-                        Severity::Low,
-                        "cve",
-                        &format!("{} → {} online CVE/exploit refs", r.query, r.results.len()),
-                    );
+            shared.running("CVE Mapping (NVD + CSE)");
+            shared.log("querying the NVD CVE database (OpenVAS-style product/version matching)…");
+            let nvd = modules::cve::map_cves(&products, Duration::from_secs(20)).await;
+            let nvd_count = nvd.len();
+            for e in nvd.iter().take(20) {
+                if e.id == "NVD-UNAVAILABLE" {
+                    shared.log(format!("CVE engine: {}", e.description));
+                    continue;
                 }
+                let sev = if e.score >= 9.0 {
+                    Severity::Critical
+                } else if e.score >= 7.0 {
+                    Severity::High
+                } else if e.score >= 4.0 {
+                    Severity::Medium
+                } else {
+                    Severity::Low
+                };
+                shared.finding(
+                    sev,
+                    "cve",
+                    &format!(
+                        "{} [{}] CVSS {:.1} — {} (NVD match for {})",
+                        e.id,
+                        e.severity,
+                        e.score,
+                        crate::util::truncate_chars(&e.description, 70),
+                        e.product
+                    ),
+                );
+                g.relate("service", &e.product, "affected-by", "cve", &e.id);
             }
-            if refs.iter().any(|r| r.error.is_some()) {
-                shared.failed("CVE Search (Google CSE)", "engine errors (see log)");
-            } else {
-                shared.done("CVE Search (Google CSE)", &format!("{} refs", hits));
+            results_cves = nvd;
+
+            // Google CSE exploit references on top (when a key exists)
+            if crate::config::resolve_cse_key(cfg).is_some() {
+                let refs = modules::dork::run_cve_search(&products, cfg, 6).await;
+                let mut hits = 0usize;
+                for r in &refs {
+                    hits += r.results.len();
+                    if let Some(e) = &r.error {
+                        shared.log(format!("cse exploit search '{}': {}", r.query, e));
+                    }
+                }
+                shared.log(format!("CSE exploit references: {} URLs", hits));
+                cve_refs = refs;
             }
-            cve_refs = refs;
+            shared.agent_reason(&format!(
+                "NVD CVE database matched {} CVEs for the fingerprinted products",
+                nvd_count
+            ));
+            shared.done(
+                "CVE Mapping (NVD + CSE)",
+                &format!("{} NVD CVEs matched", nvd_count),
+            );
         }
     }
 
@@ -601,6 +638,7 @@ pub async fn run_scan(
                 ai_decisions: vec![],
                 pivots: vec![],
                 cve_refs: vec![],
+                cves: vec![],
                 module_log: vec![],
                 phases: vec![],
             });
@@ -634,6 +672,17 @@ pub async fn run_scan(
                             plan.rationale
                         ),
                     );
+                    shared.agent_reason(&format!(
+                        "Running [{}] · because: {}",
+                        selected_modules.join(", "),
+                        plan.rationale
+                    ));
+                    let tasks: Vec<(String, String)> = selected_modules
+                        .iter()
+                        .map(|m| (m.clone(), String::new()))
+                        .chain(plan.priorities.iter().map(|p| (p.clone(), "priority".into())))
+                        .collect();
+                    shared.agent_tasks(tasks);
                     for p in &plan.priorities {
                         shared.log(format!("NightCrawler priority: {}", p));
                     }
@@ -734,6 +783,7 @@ pub async fn run_scan(
     // ------------------------------------------------------------------
     let mut subdomains: Vec<SubdomainResult> = Vec::new();
     if let Some(domain) = working_domain.clone() {
+        shared.agent_task_status("deep_subdomain", PhaseStatus::Running);
         shared.running("Subdomain Enumeration");
         match modules::subdomain::enumerate(
             &resolver,
@@ -773,6 +823,7 @@ pub async fn run_scan(
     let mut subdirs: Vec<DirResult> = Vec::new();
     let mut web_bases: Vec<String> = Vec::new();
     if has_web {
+        shared.agent_task_status("subdirs", PhaseStatus::Running);
         shared.running("Web & Directory Discovery");
         let bases = modules::subdir::web_bases(&host_header, &open_ports);
         web_bases = if bases.is_empty() {
@@ -790,6 +841,7 @@ pub async fn run_scan(
         .await
         {
             Ok(dirs) => {
+                let mut graph_urls = 0usize;
                 for d in &dirs {
                     let sev = if d.status == 200
                         && (d.url.contains("admin") || d.url.contains("backup") || d.url.contains(".git"))
@@ -799,8 +851,18 @@ pub async fn run_scan(
                         Severity::Info
                     };
                     shared.finding(sev, "web-path", &format!("{} ({} {})", d.url, d.status, d.note));
-                    if let Some(b) = web_bases.first() {
-                        g.relate("url", &d.url, "discovered-under", "url", b);
+                    // keep the graph meaningful: only notable paths become entities
+                    let notable = d.status == 200
+                        && (d.url.contains("admin")
+                            || d.url.contains("backup")
+                            || d.url.contains(".git")
+                            || d.url.contains("config")
+                            || d.url.ends_with("index.html"));
+                    if notable && graph_urls < 12 {
+                        if let Some(b) = web_bases.first() {
+                            g.relate("url", &d.url, "discovered-under", "url", b);
+                            graph_urls += 1;
+                        }
                     }
                 }
                 subdirs = dirs;
@@ -820,6 +882,7 @@ pub async fn run_scan(
     // ------------------------------------------------------------------
     let mut snmp_res: Option<SnmpResults> = None;
     if want("snmp") {
+        shared.agent_task_status("snmp", PhaseStatus::Running);
         shared.running("SNMP Enumeration");
         shared.log("probing UDP/161 with common community strings…");
         match modules::snmp::snmp_enum(ip, 161, opts.snmp_communities.clone()).await {
@@ -843,9 +906,13 @@ pub async fn run_scan(
                 if let Some(name) = &s.sysname {
                     g.relate("ip", &ip.to_string(), "snmp-name", "host", name);
                 }
+                shared.agent_task_status("snmp", PhaseStatus::Done);
                 snmp_res = Some(s);
             }
-            Err(_) => shared.skipped("SNMP Enumeration", "no community accepted"),
+            Err(_) => {
+                shared.agent_task_status("snmp", PhaseStatus::Skipped("no response".into()));
+                shared.skipped("SNMP Enumeration", "no community accepted")
+            }
         }
     } else {
         shared.skipped("SNMP Enumeration", "not selected");
@@ -856,6 +923,7 @@ pub async fn run_scan(
     // ------------------------------------------------------------------
     let mut ldap_res: Option<LdapResults> = None;
     if want("ldap") && has_ldap {
+        shared.agent_task_status("ldap", PhaseStatus::Running);
         shared.running("LDAP Enumeration");
         match modules::ldap::ldap_enum(ip, 389).await {
             Ok(l) => {
@@ -874,6 +942,7 @@ pub async fn run_scan(
                 for u in l.users.iter().take(30) {
                     g.relate("ip", &ip.to_string(), "ldap-user", "user", u);
                 }
+                shared.agent_task_status("ldap", PhaseStatus::Done);
                 ldap_res = Some(l);
             }
             Err(e) => shared.failed("LDAP Enumeration", &format!("{}", e)),
@@ -888,6 +957,7 @@ pub async fn run_scan(
     let mut netbios_res: Option<NbnsResults> = None;
     let mut smb_res: Option<SmbResults> = None;
     if want("netbios_smb") && has_smb {
+        shared.agent_task_status("netbios_smb", PhaseStatus::Running);
         shared.running("NetBIOS / SMB Enumeration");
         match modules::netbios::nbns_query(ip, 137).await {
             Ok(nb) => {
@@ -920,6 +990,7 @@ pub async fn run_scan(
                     "NetBIOS / SMB Enumeration",
                     &format!("shares:{} users:{}", s.shares.len(), s.users.len()),
                 );
+                shared.agent_task_status("netbios_smb", PhaseStatus::Done);
                 smb_res = Some(s);
             }
             Err(e) => shared.failed("NetBIOS / SMB Enumeration", &format!("{}", e)),
@@ -972,7 +1043,8 @@ pub async fn run_scan(
     let mut dorks: Vec<DorkResult> = Vec::new();
     if let Some(domain) = working_domain.clone() {
         if want("dorking") {
-            shared.running("OSINT Dorking");
+            shared.agent_task_status("dorking", PhaseStatus::Running);
+        shared.running("OSINT Dorking");
             let base = registrable(&domain);
             match modules::dork::run_dorks(&base, cfg, 10).await {
                 Ok(ds) => {
@@ -996,7 +1068,8 @@ pub async fn run_scan(
                 Err(e) => shared.failed("OSINT Dorking", &format!("{}", e)),
             }
         } else {
-            shared.skipped("OSINT Dorking", "not selected by plan");
+            shared.agent_task_status("dorking", PhaseStatus::Skipped("not selected".into()));
+        shared.skipped("OSINT Dorking", "not selected by plan");
         }
     } else {
         shared.skipped("OSINT Dorking", "no domain");
@@ -1023,7 +1096,7 @@ pub async fn run_scan(
         let mut rescan_pending: Option<String> = None;
         'followup: loop {
             rounds += 1;
-            let inter = assemble_results(&cve_refs, &started, &shared, nv.as_ref().map(|c| c.model.clone()), &target,
+            let inter = assemble_results(&cve_refs, &results_cves, &started, &shared, nv.as_ref().map(|c| c.model.clone()), &target,
                 &port_results, &vulns, &dns_results, &subdomains, &subdirs, &http_infos,
                 &snmp_res, &ldap_res, &netbios_res, &smb_res, &whois_res, &dorks, g.data(),
                 ai_plan.clone(), final_decisions.clone(), pivots.clone());
@@ -1081,6 +1154,11 @@ pub async fn run_scan(
                 "nc",
                 &format!("Follow-up plan: [{}] — {}", action_names.join(", "), plan.reason),
             );
+            shared.agent_reason(&format!(
+                "Follow-ups → [{}] · because: {}",
+                action_names.join(", "),
+                plan.reason
+            ));
             final_decisions.push(AiDecision {
                 stage: format!("follow-up-{}", rounds),
                 decision: format!("[{}]", action_names.join(", ")),
@@ -1167,7 +1245,7 @@ pub async fn run_scan(
                     }
                     FollowUpAction::PivotDomains { domains } => {
                         let candidates = pivot_candidates(
-                            &assemble_results(&cve_refs, &started, &shared, nv.as_ref().map(|c| c.model.clone()), &target,
+                            &assemble_results(&cve_refs, &results_cves, &started, &shared, nv.as_ref().map(|c| c.model.clone()), &target,
                                 &port_results, &vulns, &dns_results, &subdomains, &subdirs, &http_infos,
                                 &snmp_res, &ldap_res, &netbios_res, &smb_res, &whois_res, &dorks, g.data(),
                                 ai_plan.clone(), final_decisions.clone(), pivots.clone()),
@@ -1303,7 +1381,7 @@ pub async fn run_scan(
         &format!("{} nodes / {} edges", graph.nodes.len(), graph.edges.len()),
     );
 
-    let mut results = assemble_results(&cve_refs, &started, &shared, nv.as_ref().map(|c| c.model.clone()), &target,
+    let mut results = assemble_results(&cve_refs, &results_cves, &started, &shared, nv.as_ref().map(|c| c.model.clone()), &target,
         &port_results, &vulns, &dns_results, &subdomains, &subdirs, &http_infos,
         &snmp_res, &ldap_res, &netbios_res, &smb_res, &whois_res, &dorks, graph.clone(),
         ai_plan.clone(), final_decisions, pivots);
@@ -1437,7 +1515,7 @@ pub fn is_ip_literal(s: &str) -> bool {
     s.parse::<std::net::Ipv6Addr>().is_ok()
 }
 
-fn assemble_results(cve_refs: &[DorkResult],
+fn assemble_results(cve_refs: &[DorkResult], cves: &[CveEntry],
     started: &Instant,
     shared: &SharedState,
     ai_model: Option<String>,
@@ -1460,6 +1538,7 @@ fn assemble_results(cve_refs: &[DorkResult],
     pivots: Vec<PivotData>,
 ) -> ReconResults {
     let cve_refs = cve_refs.to_vec();
+    let cves = cves.to_vec();
     let duration = started.elapsed().as_secs();
     ReconResults {
         meta: Meta {
@@ -1490,6 +1569,7 @@ fn assemble_results(cve_refs: &[DorkResult],
         ai_decisions,
         pivots,
         cve_refs,
+        cves,
         module_log: vec![],
         phases: shared.with(|s| {
             s.phases

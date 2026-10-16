@@ -423,13 +423,17 @@ fn svg_graph(graph: &GraphData) -> String {
         let (x, y) = pos[&n.id];
         let color = node_color(&n.kind);
         let label: String = n.label.chars().take(26).collect();
+        let tx = x + 10.0;
+        let ty = y + 19.0;
         svg += &format!(
             r##"<g><rect x="{x}" y="{y}" width="200" height="{nh}" rx="7" fill="#111826" stroke="{color}" stroke-width="1.4"/>
-<text x="{x}+10" y="{y}+19" font-size="12" fill="#dbe4f0">{lbl} <tspan fill="#5b6b82" font-size="10">[{kind}]</tspan></text></g>"##,
+<text x="{tx}" y="{ty}" font-size="12" fill="#dbe4f0">{lbl} <tspan fill="#5b6b82" font-size="10">[{kind}]</tspan></text></g>"##,
             x = x,
             y = y,
             nh = node_h,
             color = color,
+            tx = tx,
+            ty = ty,
             lbl = html_escape(&label),
             kind = html_escape(&n.kind)
         );
@@ -458,6 +462,20 @@ fn section_open(title: &str, icon: &str) -> String {
 
 fn section_close() -> &'static str {
     "</div>"
+}
+
+/// Collapsible appendix section (raw tool evidence).
+fn appendix_open(title: &str, icon: &str, open: bool) -> String {
+    format!(
+        r#"<details class="section"{}><summary style="font-size:17px;color:#cbd5e1">{} {} — <span class="muted">evidence</span></summary>"#,
+        if open { " open" } else { "" },
+        icon,
+        title
+    )
+}
+
+fn appendix_close() -> &'static str {
+    "</details>"
 }
 
 fn findings_block(results: &ReconResults) -> String {
@@ -497,14 +515,48 @@ fn findings_block(results: &ReconResults) -> String {
 }
 
 fn cve_block(results: &ReconResults) -> String {
-    let mut h = section_open("CVE & Exploit References (Google CSE)", "🧨");
-    if results.cve_refs.is_empty() {
-        h += "<p class='muted'>Online CVE mapping disabled — set <code>GOOGLE_CSE_KEY</code> to enable (engine cx <code>e724058a30fea47fa</code>).</p>";
-    } else {
+    if results.cves.is_empty() && results.cve_refs.is_empty() {
+        return String::new();
+    }
+    let mut h = section_open("CVE Map — NVD database (OpenVAS-style matching)", "🧨");
+    if !results.cves.is_empty() {
+        h += "<p class='muted'>Product/version pairs from the scan, matched against the NVD CVE database — the same source Greenbone/OpenVAS correlates against. Sorted by CVSS.</p><table><tr><th>CVE</th><th>CVSS</th><th>Severity</th><th>Product</th><th>Description</th></tr>";
+        for e in results.cves.iter().take(40) {
+            if e.id == "NVD-UNAVAILABLE" {
+                h += &format!(
+                    "<tr><td colspan='5' style='color:#ef4444'>{}</td></tr>",
+                    html_escape(&e.description)
+                );
+                continue;
+            }
+            let color = if e.score >= 9.0 {
+                "#ef4444"
+            } else if e.score >= 7.0 {
+                "#f97316"
+            } else if e.score >= 4.0 {
+                "#fbbf24"
+            } else {
+                "#22d3ee"
+            };
+            h += &format!(
+                "<tr><td><a href=\"{}\" target=\"_blank\"><b>{}</b></a></td><td><span class='chip' style='background:{}'>{:.1}</span></td><td>{}</td><td><code>{}</code></td><td>{}</td></tr>",
+                html_escape(&e.url),
+                html_escape(&e.id),
+                color,
+                e.score,
+                html_escape(&e.severity),
+                html_escape(&e.product),
+                html_escape(&e.description)
+            );
+        }
+        h += "</table>";
+    }
+    if !results.cve_refs.is_empty() {
+        h += "<h3 class='sub'>Exploit references (Google CSE)</h3>";
         for r in &results.cve_refs {
             if let Some(e) = &r.error {
                 h += &format!(
-                    "<p class='muted'>{} — <span style='color:var(--red)'>{}</span></p>",
+                    "<p class='muted'>{} — <span style='color:#ef4444'>{}</span></p>",
                     html_escape(&r.query),
                     html_escape(e)
                 );
@@ -522,12 +574,14 @@ fn cve_block(results: &ReconResults) -> String {
                 h += "</ul>";
             }
         }
+    } else {
+        h += "<p class='muted'>Set <code>GOOGLE_CSE_KEY</code> to also collect exploit-DB style references via the Programmable Search Engine (cx e724058a30fea47fa).</p>";
     }
     h + section_close()
 }
 
 fn ports_block(results: &ReconResults) -> String {
-    let mut h = section_open("Open Ports & Services", "🔌");
+    let mut h = appendix_open("Ports & Services", "🔌", true);
     if results.ports.is_empty() {
         h += "<p class='muted'>No open TCP ports detected.</p>";
         return h + section_close();
@@ -545,14 +599,14 @@ fn ports_block(results: &ReconResults) -> String {
         );
     }
     h += "</table>";
-    h + section_close()
+    h + appendix_close()
 }
 
 fn web_block(results: &ReconResults) -> String {
     if results.http.is_empty() && results.subdirs.is_empty() {
         return String::new();
     }
-    let mut h = section_open("Web Applications", "🌐");
+    let mut h = appendix_open("Web Applications", "🌐", true);
     for info in &results.http {
         h += &format!(
             "<h3 class='sub'>{}</h3><p class='muted'>status {} · server <code>{}</code> · title <i>{}</i></p>",
@@ -597,7 +651,7 @@ fn web_block(results: &ReconResults) -> String {
         }
         h += "</table></details>";
     }
-    h + section_close()
+    h + appendix_close()
 }
 
 fn enum_block(results: &ReconResults) -> String {
@@ -661,7 +715,7 @@ fn enum_block(results: &ReconResults) -> String {
         );
     }
     if any {
-        format!("<div class=\"section\"><h2> Enumeration Results</h2>{}{}</div>", "🛰", h)
+        format!("<details class=\"section\" open><summary style=\"font-size:17px;color:#cbd5e1\">🛰 Enumeration Results — <span class=\"muted\">evidence</span></summary>{}</details>", h)
     } else {
         String::new()
     }
@@ -672,7 +726,7 @@ fn dns_block(results: &ReconResults) -> String {
         Some(d) => d,
         None => return String::new(),
     };
-    let mut h = section_open("DNS", "🗺");
+    let mut h = appendix_open("DNS & Subdomains", "🗺", false);
     if dns.axfr_success {
         h += "<p><b style='color:var(--red)'>Zone transfer SUCCEEDED</b> — the entire zone leaked:</p><ul>";
         for r in dns.axfr_records.iter().take(40) {
@@ -721,14 +775,14 @@ fn dns_block(results: &ReconResults) -> String {
             p.dorks.iter().map(|d| d.results.len()).sum::<usize>()
         );
     }
-    h + section_close()
+    h + appendix_close()
 }
 
 fn osint_block(results: &ReconResults) -> String {
     if results.dorks.is_empty() {
         return String::new();
     }
-    let mut h = section_open("OSINT Dorking", "🔎");
+    let mut h = appendix_open("OSINT Dorking", "🔎", false);
     for d in &results.dorks {
         if let Some(e) = &d.error {
             h += &format!(
@@ -759,7 +813,7 @@ fn osint_block(results: &ReconResults) -> String {
             h += "</ul>";
         }
     }
-    h + section_close()
+    h + appendix_close()
 }
 
 fn timeline_block(results: &ReconResults) -> String {

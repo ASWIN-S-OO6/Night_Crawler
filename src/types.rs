@@ -225,6 +225,16 @@ pub struct AiPlan {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CveEntry {
+    pub id: String,
+    pub product: String,
+    pub description: String,
+    pub severity: String,
+    pub score: f64,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AiDecision {
     pub stage: String,
     pub decision: String,
@@ -261,6 +271,7 @@ pub struct ReconResults {
     pub ai_decisions: Vec<AiDecision>,
     pub pivots: Vec<PivotData>,
     pub cve_refs: Vec<DorkResult>,
+    pub cves: Vec<CveEntry>,
     pub module_log: Vec<String>,
     pub phases: Vec<(String, String)>,
 }
