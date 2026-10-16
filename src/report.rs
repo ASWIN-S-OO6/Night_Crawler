@@ -25,12 +25,14 @@ pub fn write_reports(results: &ReconResults, out_root: &Path) -> Result<PathBuf>
         serde_json::to_string_pretty(&results.graph)?,
     )?;
 
-    // report.md
+    // report.md (text) + report.html (graphical dashboard)
     let md = build_markdown(results, &mermaid);
-    let report_path = dir.join("report.md");
-    std::fs::write(&report_path, md)?;
+    std::fs::write(dir.join("report.md"), md)?;
 
-    Ok(report_path)
+    let html_path = dir.join("report.html");
+    std::fs::write(&html_path, crate::report_html::build_html(results))?;
+
+    Ok(html_path)
 }
 
 fn build_mermaid_from_graph(graph: &crate::types::GraphData) -> String {

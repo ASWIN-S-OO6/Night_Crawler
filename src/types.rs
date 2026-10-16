@@ -260,6 +260,7 @@ pub struct ReconResults {
     pub ai_model: Option<String>,
     pub ai_decisions: Vec<AiDecision>,
     pub pivots: Vec<PivotData>,
+    pub cve_refs: Vec<DorkResult>,
     pub module_log: Vec<String>,
     pub phases: Vec<(String, String)>,
 }

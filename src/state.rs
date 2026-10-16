@@ -79,6 +79,7 @@ impl AppState {
             "Port Scan",
             "Service & Version Detection",
             "Vulnerability Fingerprinting",
+            "CVE Search (Google CSE)",
             "NightCrawler Planning",
             "DNS Recon",
             "Zone Transfer (AXFR)",

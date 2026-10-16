@@ -9,7 +9,7 @@
 //! by the event loop — the UI never blocks.
 
 use crate::ai::NvClient;
-use crate::config::{resolve_provider_input, save_provider, ProviderSetup, Config};
+use crate::config::{resolve_provider_input, ProviderSetup, Config};
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},

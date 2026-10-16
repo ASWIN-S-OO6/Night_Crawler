@@ -26,6 +26,33 @@ pub struct DorkCfg {
     pub serpapi_key: Option<String>,
 }
 
+/// The Google Programmable Search Engine ID used for dorking + CVE search.
+/// Override with `google_cse_cx` in the config file if you build your own.
+pub const DEFAULT_CSE_CX: &str = "e724058a30fea47fa";
+
+/// Google CSE API key: env GOOGLE_CSE_KEY > config [dorking] google_cse_key.
+/// Create a free key at https://developers.google.com/custom-search/v1/overview
+/// (100 queries/day free — enough for a full dork + CVE sweep).
+pub fn resolve_cse_key(cfg: &Config) -> Option<String> {
+    if let Ok(k) = std::env::var("GOOGLE_CSE_KEY") {
+        if !k.is_empty() {
+            return Some(k);
+        }
+    }
+    cfg.dorking
+        .google_cse_key
+        .clone()
+        .filter(|k| !k.is_empty())
+}
+
+pub fn resolve_cse_cx(cfg: &Config) -> String {
+    cfg.dorking
+        .google_cse_cx
+        .clone()
+        .filter(|c| !c.is_empty())
+        .unwrap_or_else(|| DEFAULT_CSE_CX.to_string())
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct ScanCfg {

@@ -491,6 +491,54 @@ pub async fn run_scan(
         &format!("{} potential issues", vulns.len()),
     );
 
+    // ------------------------------------------------------------------
+    // Phase 6b: CVE mapping via the Google Programmable Search Engine
+    // ------------------------------------------------------------------
+    let mut cve_refs: Vec<DorkResult> = Vec::new();
+    {
+        let mut products: Vec<(String, Option<String>)> = port_results
+            .iter()
+            .filter(|p| p.product.is_some())
+            .map(|p| (p.product.clone().unwrap_or_default(), p.version.clone()))
+            .collect();
+        for v in &vulns {
+            if let Some(cve) = &v.cve {
+                products.push((cve.clone(), None));
+            }
+        }
+        products.truncate(10);
+        if products.is_empty() {
+            shared.skipped("CVE Search (Google CSE)", "no products fingerprinted");
+        } else if crate::config::resolve_cse_key(cfg).is_none() {
+            shared.skipped(
+                "CVE Search (Google CSE)",
+                "no GOOGLE_CSE_KEY — set it to enable online CVE mapping",
+            );
+        } else {
+            shared.running("CVE Search (Google CSE)");
+            let refs = modules::dork::run_cve_search(&products, cfg, 6).await;
+            let mut hits = 0usize;
+            for r in &refs {
+                hits += r.results.len();
+                if let Some(e) = &r.error {
+                    shared.log(format!("cve search '{}': {}", r.query, e));
+                } else if !r.results.is_empty() {
+                    shared.finding(
+                        Severity::Low,
+                        "cve",
+                        &format!("{} → {} online CVE/exploit refs", r.query, r.results.len()),
+                    );
+                }
+            }
+            if refs.iter().any(|r| r.error.is_some()) {
+                shared.failed("CVE Search (Google CSE)", "engine errors (see log)");
+            } else {
+                shared.done("CVE Search (Google CSE)", &format!("{} refs", hits));
+            }
+            cve_refs = refs;
+        }
+    }
+
     // Working domain for domain-based phases
     let working_domain: Option<String> = if target.input_kind == "domain" {
         target.hostname.clone()
@@ -552,6 +600,7 @@ pub async fn run_scan(
                 ai_model: None,
                 ai_decisions: vec![],
                 pivots: vec![],
+                cve_refs: vec![],
                 module_log: vec![],
                 phases: vec![],
             });
@@ -974,7 +1023,7 @@ pub async fn run_scan(
         let mut rescan_pending: Option<String> = None;
         'followup: loop {
             rounds += 1;
-            let inter = assemble_results(&started, &shared, nv.as_ref().map(|c| c.model.clone()), &target,
+            let inter = assemble_results(&cve_refs, &started, &shared, nv.as_ref().map(|c| c.model.clone()), &target,
                 &port_results, &vulns, &dns_results, &subdomains, &subdirs, &http_infos,
                 &snmp_res, &ldap_res, &netbios_res, &smb_res, &whois_res, &dorks, g.data(),
                 ai_plan.clone(), final_decisions.clone(), pivots.clone());
@@ -1118,7 +1167,7 @@ pub async fn run_scan(
                     }
                     FollowUpAction::PivotDomains { domains } => {
                         let candidates = pivot_candidates(
-                            &assemble_results(&started, &shared, nv.as_ref().map(|c| c.model.clone()), &target,
+                            &assemble_results(&cve_refs, &started, &shared, nv.as_ref().map(|c| c.model.clone()), &target,
                                 &port_results, &vulns, &dns_results, &subdomains, &subdirs, &http_infos,
                                 &snmp_res, &ldap_res, &netbios_res, &smb_res, &whois_res, &dorks, g.data(),
                                 ai_plan.clone(), final_decisions.clone(), pivots.clone()),
@@ -1205,8 +1254,8 @@ pub async fn run_scan(
             }
             shared.thinking(false);
 
-            if rounds >= 2 {
-                shared.done("NightCrawler Follow-up", "round limit reached");
+            if rounds >= 3 {
+                shared.done("NightCrawler Follow-up", "round limit reached (3)");
                 break 'followup;
             }
         }
@@ -1254,7 +1303,7 @@ pub async fn run_scan(
         &format!("{} nodes / {} edges", graph.nodes.len(), graph.edges.len()),
     );
 
-    let mut results = assemble_results(&started, &shared, nv.as_ref().map(|c| c.model.clone()), &target,
+    let mut results = assemble_results(&cve_refs, &started, &shared, nv.as_ref().map(|c| c.model.clone()), &target,
         &port_results, &vulns, &dns_results, &subdomains, &subdirs, &http_infos,
         &snmp_res, &ldap_res, &netbios_res, &smb_res, &whois_res, &dorks, graph.clone(),
         ai_plan.clone(), final_decisions, pivots);
@@ -1388,7 +1437,7 @@ pub fn is_ip_literal(s: &str) -> bool {
     s.parse::<std::net::Ipv6Addr>().is_ok()
 }
 
-fn assemble_results(
+fn assemble_results(cve_refs: &[DorkResult],
     started: &Instant,
     shared: &SharedState,
     ai_model: Option<String>,
@@ -1410,6 +1459,7 @@ fn assemble_results(
     ai_decisions: Vec<AiDecision>,
     pivots: Vec<PivotData>,
 ) -> ReconResults {
+    let cve_refs = cve_refs.to_vec();
     let duration = started.elapsed().as_secs();
     ReconResults {
         meta: Meta {
@@ -1439,6 +1489,7 @@ fn assemble_results(
         ai_model,
         ai_decisions,
         pivots,
+        cve_refs,
         module_log: vec![],
         phases: shared.with(|s| {
             s.phases

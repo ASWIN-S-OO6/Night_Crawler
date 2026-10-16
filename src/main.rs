@@ -181,7 +181,7 @@ async fn build_cli_ai(cli: &Cli, cfg: &config::Config) -> Option<ai::NvClient> {
     if cli.no_ai {
         return None;
     }
-    // provider-config file > --api-key flag > env > config file
+    // provider-config file > --api-key flag > env > saved provider.toml > config file
     let setup: Option<config::ProviderSetup> = if let Some(path) = &cli.provider_config {
         match config::resolve_provider_input(&path.to_string_lossy()) {
             Ok(s) => Some(s),
@@ -191,15 +191,17 @@ async fn build_cli_ai(cli: &Cli, cfg: &config::Config) -> Option<ai::NvClient> {
             }
         }
     } else {
-        config::resolve_nvidia_key(cli.api_key.as_deref(), cfg).map(|key| config::ProviderSetup {
-            api_key: key,
-            base_url: cli
-                .base_url
-                .clone()
-                .or_else(|| cfg.nvidia.base_url.clone())
-                .unwrap_or_else(config::default_base_url),
-            model: cli.model.clone().or_else(|| cfg.nvidia.model.clone()),
-        })
+        config::resolve_nvidia_key(cli.api_key.as_deref(), cfg)
+            .map(|key| config::ProviderSetup {
+                api_key: key,
+                base_url: cli
+                    .base_url
+                    .clone()
+                    .or_else(|| cfg.nvidia.base_url.clone())
+                    .unwrap_or_else(config::default_base_url),
+                model: cli.model.clone().or_else(|| cfg.nvidia.model.clone()),
+            })
+            .or_else(config::load_saved_provider)
     };
 
     let setup = setup?;
@@ -364,7 +366,7 @@ fn run_scan_and_finish(
             println!("  agent:   \x1b[1;32m{}\x1b[0m", model);
         }
         if let Some(path) = &s.report_path {
-            println!("  report:   \x1b[1m{}\x1b[0m", path);
+            println!("  report:   \x1b[1m{}\x1b[0m (graphical dashboard)", path);
         }
         if let Some(err) = &s.error {
             println!("  \x1b[31merror: {}\x1b[0m", err);
@@ -396,7 +398,7 @@ fn run_scan_and_finish(
     }
 
     match scan_result {
-        Ok(_results) => println!("\n  \x1b[2mfull data in findings.json beside report.md\x1b[0m\n"),
+        Ok(_results) => println!("\n  \x1b[2mopen report.html in a browser · raw data in findings.json\x1b[0m\n"),
         Err(e) => {
             println!("  \x1b[31mscan error: {}\x1b[0m\n", e);
         }

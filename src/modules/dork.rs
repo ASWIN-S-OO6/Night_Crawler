@@ -1,4 +1,4 @@
-use crate::config::Config;
+use crate::config::{resolve_cse_cx, resolve_cse_key, Config};
 use crate::types::DorkResult;
 use crate::util::pct_decode;
 use anyhow::Result;
@@ -25,8 +25,29 @@ pub fn build_dorks(domain: &str) -> Vec<String> {
     ]
 }
 
+/// Build CVE-mapping queries for every detected product/version pair.
+pub fn build_cve_queries(products: &[(String, Option<String>)]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for (product, version) in products {
+        let p = product.trim();
+        if p.is_empty() {
+            continue;
+        }
+        let q = match version {
+            Some(v) if !v.trim().is_empty() => format!("{} {} CVE vulnerability exploit", p, v.trim()),
+            _ => format!("{} known vulnerabilities CVE exploit", p),
+        };
+        if seen.insert(q.clone()) {
+            out.push(q);
+        }
+    }
+    out.truncate(8);
+    out
+}
+
 /// Execute dorks with the best available engine:
-/// Google CSE API > SerpAPI > DuckDuckGo HTML (no key required).
+/// Google Programmable Search (CSE) > SerpAPI > DuckDuckGo (no key needed).
 pub async fn run_dorks(
     domain: &str,
     cfg: &Config,
@@ -41,17 +62,14 @@ pub async fn run_dorks(
     let mut out: Vec<DorkResult> = Vec::new();
 
     for (i, q) in dorks.iter().enumerate() {
-        // be polite to the free engine
-        if cfg.dorking.google_cse_key.is_none()
-            && cfg.dorking.serpapi_key.is_none()
-            && i > 0
-        {
+        if resolve_cse_key(cfg).is_none() && cfg.dorking.serpapi_key.is_none() && i > 0 {
             tokio::time::sleep(Duration::from_millis(1500)).await;
         }
 
         let (engine, results, err): (String, Vec<String>, Option<String>) =
-            if let (Some(key), Some(cx)) = (&cfg.dorking.google_cse_key, &cfg.dorking.google_cse_cx) {
-                match google_cse(&client, key, cx, q, max_per_dork).await {
+            if let Some(key) = resolve_cse_key(cfg) {
+                let cx = resolve_cse_cx(cfg);
+                match google_cse(&client, &key, &cx, q, max_per_dork).await {
                     Ok(r) => ("google-cse".into(), r, None),
                     Err(e) => ("google-cse".into(), vec![], Some(e.to_string())),
                 }
@@ -77,7 +95,46 @@ pub async fn run_dorks(
     Ok(out)
 }
 
-async fn google_cse(
+/// CVE mapping: search the Google Programmable Search Engine for each
+/// detected product/version's known vulnerabilities and exploits.
+pub async fn run_cve_search(
+    products: &[(String, Option<String>)],
+    cfg: &Config,
+    max_per_query: usize,
+) -> Vec<DorkResult> {
+    let key = match resolve_cse_key(cfg) {
+        Some(k) => k,
+        None => return Vec::new(), // caller marks the phase skipped
+    };
+    let cx = resolve_cse_cx(cfg);
+    let client = match reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36")
+        .timeout(Duration::from_secs(20))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut out = Vec::new();
+    for q in build_cve_queries(products) {
+        let (results, err) = match google_cse(&client, &key, &cx, &q, max_per_query).await {
+            Ok(r) => (r, None),
+            Err(e) => (vec![], Some(e.to_string())),
+        };
+        out.push(DorkResult {
+            query: format!("cve: {}", q),
+            engine: "google-cse".into(),
+            results,
+            error: err,
+        });
+        tokio::time::sleep(Duration::from_millis(350)).await;
+    }
+    out
+}
+
+/// Google Programmable Search Engine — official JSON API.
+pub async fn google_cse(
     client: &reqwest::Client,
     key: &str,
     cx: &str,
@@ -92,10 +149,15 @@ async fn google_cse(
         urlencode(query)
     );
     let resp: serde_json::Value = client.get(&url).send().await?.error_for_status()?.json().await?;
+    parse_cse_response(&resp, max)
+}
+
+/// Parse a CSE API response — unit-testable.
+pub fn parse_cse_response(v: &serde_json::Value, max: usize) -> Result<Vec<String>> {
     let mut links = Vec::new();
-    if let Some(items) = resp.get("items").and_then(|v| v.as_array()) {
+    if let Some(items) = v.get("items").and_then(|i| i.as_array()) {
         for it in items.iter().take(max) {
-            if let Some(l) = it.get("link").and_then(|v| v.as_str()) {
+            if let Some(l) = it.get("link").and_then(|l| l.as_str()) {
                 links.push(l.to_string());
             }
         }
@@ -145,9 +207,7 @@ async fn duckduckgo(
     }
     let lower = body.to_ascii_lowercase();
     if lower.contains("anomaly") || lower.contains("unusual traffic") || lower.contains("captcha") {
-        return Err(anyhow::anyhow!(
-            "DDG anti-bot challenge (no API key engine configured)"
-        ));
+        return Err(anyhow::anyhow!("DDG anti-bot challenge (no CSE key configured)"));
     }
     let re = regex::Regex::new(r#"uddg=([^"&]+)"#)?;
     let mut links: Vec<String> = Vec::new();
@@ -177,4 +237,39 @@ fn urlencode(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cse_response_parsed() {
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"items": [{"link": "https://nvd.nist.gov/vuln/detail/CVE-2015-3306"},
+                          {"link": "https://www.exploit-db.com/exploits/36742"}]}"#,
+        )
+        .unwrap();
+        let links = parse_cse_response(&v, 10).unwrap();
+        assert_eq!(links.len(), 2);
+        assert!(links[0].contains("CVE-2015-3306"));
+    }
+
+    #[test]
+    fn cse_response_empty_is_ok() {
+        let v: serde_json::Value = serde_json::from_str("{}").unwrap();
+        assert!(parse_cse_response(&v, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn cve_queries_built() {
+        let q = build_cve_queries(&[
+            ("ProFTPD".into(), Some("1.3.5".into())),
+            ("Apache httpd".into(), Some("2.4.7".into())),
+            ("ProFTPD".into(), Some("1.3.5".into())), // dedup
+        ]);
+        assert_eq!(q.len(), 2);
+        assert!(q[0].contains("ProFTPD 1.3.5"));
+        assert!(q[0].contains("CVE"));
+    }
 }

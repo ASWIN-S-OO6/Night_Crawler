@@ -5,6 +5,7 @@ pub mod graph;
 pub mod modules;
 pub mod orchestrator;
 pub mod report;
+pub mod report_html;
 pub mod state;
 pub mod types;
 pub mod ui;

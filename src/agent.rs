@@ -42,12 +42,14 @@ pub struct PortStrategy {
 }
 
 pub async fn decide_port_strategy(client: &NvClient, snapshot: &Value) -> Result<PortStrategy> {
-    let task = "Choose the TCP port scan strategy for the target.
+    let task = "Acting as an offensive-security professional whose goal is MAXIMUM information gathering within scope, choose the TCP port scan strategy for the target.
 
 Allowed values for \"ports\":
-- \"top\"  : fast sweep of ~500 common service ports. Best default for unknown internet hosts.
-- \"full\" : all 65535 ports. Only for dedicated infrastructure/lab hosts where completeness is required.
+- \"top\"  : fast sweep of ~500 common service ports.
+- \"full\" : all 65535 ports — the professional default when the target is infrastructure, a lab box, a single-purpose host with few services, or when you need full coverage. Prefer this whenever runtime is acceptable.
 - a compact custom spec using ranges and lists, e.g. \"1-1024,3306,3389,4443,5900,8000-8100\", when the target profile suggests specific services.
+
+Professional bias: unknown single-host internet targets with no clear profile deserve at least a \"full\" sweep if the operator can afford it; use \"top\" when the evidence (domain, shared hosting, CDN) suggests a narrow set. Err toward more coverage, not less.
 
 JSON shape: {\"ports\": \"...\", \"reason\": \"<= 20 words\"}";
 
@@ -75,9 +77,9 @@ pub struct ModulePlan {
 }
 
 pub async fn plan_modules(client: &NvClient, snapshot: &Value) -> Result<ModulePlan> {
-    let task = "The first enumeration pass finished for the target. Select which optional modules run next.
+    let task = "The first enumeration pass finished for the target. Select which optional modules run next — you are an offensive-security professional gathering maximum information within scope.
 
-Available optional modules — choose ONLY from these, ONLY when the evidence supports them:
+Your objective is maximum defensible information gathering (doctrine §3): when uncertain, INCLUDE the module — harmless probes are preferred over missed attack surface. Choose ONLY from these modules:
 - \"snmp\"        : SNMP walk. UDP probe, harmless; useful for network gear, printers, servers.
 - \"ldap\"        : LDAP enumeration. Applicable when TCP/389, 636 or 3268 is open.
 - \"netbios_smb\" : NetBIOS + SMB enumeration. Applicable when 137/139/445 open or target looks like Windows.
@@ -85,7 +87,7 @@ Available optional modules — choose ONLY from these, ONLY when the evidence su
 - \"deep_subdomain\": subdomain dictionary brute force. Applicable when the target has a domain.
 - \"dorking\"     : OSINT search queries. Applicable when a domain is known.
 
-Do not select modules the evidence does not support (doctrine §3).
+Every module whose preconditions are even plausibly met should be selected — a refused probe costs seconds, a missed service costs the engagement.
 
 JSON shape: {\"modules\": [\"...\"], \"priorities\": [\"short focus strings\"], \"rationale\": \"one or two sentences\"}";
 
@@ -136,7 +138,7 @@ pub struct FollowUpPlan {
 }
 
 pub async fn decide_followups(client: &NvClient, snapshot: &Value) -> Result<FollowUpPlan> {
-    let task = "The enumeration pass finished. Review the combined results and decide follow-up tasks that add NEW information (doctrine §3, §8). You may issue at most 3 actions.
+    let task = "The enumeration pass finished. You are an offensive-security professional hunting for the maximum attack surface. Review the combined results and decide follow-up tasks that add NEW information (doctrine §3, §8). You may issue up to 4 actions — use them all if each adds real coverage.
 
 Allowed actions — respond ONLY with these, as a JSON array:
 - {\"action\":\"extend_dirs\",\"bases\":[...],\"words\":[...]}  : probe up to 60 extra web path segments (e.g. \"jenkins\", \"backup2\", \"api-old\"). bases must be taken from the provided web_roots evidence.
@@ -157,8 +159,8 @@ JSON shape: {\"actions\": [...], \"reason\": \"<= 25 words\"}";
     let json = chat_json(client, task, &user, 0.2, 3000).await?;
     let parsed: FollowUpPlan = serde_json::from_str(&json)
         .with_context(|| format!("bad follow-up JSON: {}", truncate(&json, 160)))?;
-    if parsed.actions.len() > 3 {
-        return Err(anyhow!("model requested > 3 actions"));
+    if parsed.actions.len() > 4 {
+        return Err(anyhow!("model requested > 4 actions"));
     }
     Ok(parsed)
 }
@@ -177,6 +179,7 @@ pub async fn analyze_report(client: &NvClient, results_json: &str, target: &str)
 ## Ports and Services
 ## Findings
 ## Attack Paths
+## Exploitation Recommendations
 ## Recommendations
 ## Limitations
 ## Conclusion
@@ -192,6 +195,8 @@ For each finding inside Findings use this structure:
 - Remediation: what to fix, prioritized
 
 Attack Paths must be chained, ordered narratives — where the problem is, how to start, what the next moves are from an attacker's perspective, referencing only services actually found in the data.
+
+Exploitation Recommendations is the operator's action list: ordered, concrete suggestions for exploiting the target based on the results — for each, give the exact tool or command to run, what it validates, and the scan evidence that justifies trying it. Never leave this section generic: every recommendation must reference a specific finding.
 
 Use ONLY the evidence provided — never invent ports, versions, CVEs, or hosts. Mark anything inferred as UNCONFIRMED. Be concrete and technical.";
 
