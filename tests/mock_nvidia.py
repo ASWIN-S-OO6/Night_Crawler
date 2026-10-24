@@ -21,6 +21,14 @@ REPORT_MD = """## Executive Summary
 ## Attack Paths
 
 1. FTP foothold: connect to 9999, exploit ProFTPD 1.3.5 mod_copy (SITE CPFR/CPTO) to stage a webshell.
+
+## Exploitation Recommendations
+
+1. Run `ftp 127.0.0.1 9999`, then SITE CPFR / CPTO to stage a webshell — validate CVE-2015-3306.
+
+## Recommendations
+
+- Update ProFTPD.
 """
 
 
@@ -64,5 +72,6 @@ class H(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-port = int(sys.argv[1]) if len(sys.argv) > 1 else 18700
+import os
+port = int(sys.argv[1]) if len(sys.argv) > 1 else int(os.environ.get("MOCK_PORT", "18700"))
 HTTPServer(("127.0.0.1", port), H).serve_forever()

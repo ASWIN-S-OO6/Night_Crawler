@@ -14,12 +14,22 @@ exploitation recommendations.
 
 ---
 
-## Quick start
+## Quick start — browser GUI
 
 ```bash
 cargo build --release
-./target/release/night-crawler          # setup wizard (first run)
+./target/release/night-crawler          # opens the GUI in your browser
 ```
+
+The default interface is now a **browser GUI**: Night Crawler serves a live
+dashboard at `http://127.0.0.1:7655` (auto-opens your browser). Enter the
+target (and optionally a provider key/path) in the setup form — the scan
+runs live in front of you: phases, the NightCrawler brain (tasks +
+reasoning), findings and progress; when it finishes, the full graphical
+report opens. The server stays up so you can revisit the report any time.
+
+The terminal interfaces remain: `--tui` gives the classic terminal dashboard
+(+ setup wizard), `--no-tui` gives plain log output for CI.
 
 ```
 ┌ 🕷 NIGHT CRAWLER — SETUP ───────────────────────────────┐
@@ -48,16 +58,17 @@ cargo build --release
 | 1. Resolve | IP→domain via PTR + TLS cert SANs; domain→IP via DNS + ping |
 | 2. Port strategy | **The model decides**: top / full 65535 / custom ranges, biased toward maximum coverage |
 | 3. Port scan | Async TCP connect scan with live progress gauge |
-| 4. Fingerprinting | Banner grabbing, product/version extraction (SSH, Apache, nginx, ProFTPD, MySQL, IIS, …) |
-| 5. Vulnerability matching | Local CVE database with **CONFIRMED / LIKELY / POSSIBLE** confidence levels (doctrine §5) |
+| 4. Fingerprinting | Banner grabbing, product/version extraction + **host identification**: OS fingerprint from ICMP TTL, traceroute path, geo/ASN/ISP lookup, PTR everywhere |
+| 5. Host ID | OS (TTL), traceroute, geo/ASN, PTR — populates the Target section with every detail about the host |
+| 6. Vulnerability matching | Local CVE database with **CONFIRMED / LIKELY / POSSIBLE** confidence levels (doctrine §5) |
 | 6. CVE mapping | **OpenVAS/Greenbone-style engine**: product→CPE identification → NVD CVE database query → client-side version-range verification → CVSS-ranked results; keyword + CIRCL fallbacks, plus Google CSE (`cx e724058a30fea47fa`) exploit references |
 | 7. Planning | The model selects which modules run (SNMP/LDAP/SMB/dirs/subdomains/dorking) |
-| 8. Recon modules | DNS + AXFR zone transfer, subdomains (crt.sh + brute), web directories, SNMP walk, LDAP, NetBIOS/SMB, WHOIS, dorking |
-| 9. Follow-up | The model reviews **combined evidence** and chains extra tasks: `extend_dirs`, `probe_web_roots`, `pivot_domains`, `rescan_ports` — up to 3 rounds, bounded & validated |
+| 8. Recon modules | DNS + AXFR zone transfer, subdomains (crt.sh + brute), web directories, **ZAP-style web scan** (passive header/cookie checks + active XSS/SQLi/traversal/open-redirect/host-header probes), SNMP walk, LDAP, NetBIOS/SMB, WHOIS, dorking |
+| 9. Follow-up | The model reviews **combined evidence** (incl. ZAP alerts + host fingerprint) and chains extra tasks: `extend_dirs`, `probe_web_roots`, `pivot_domains`, `rescan_ports` — up to 3 rounds, bounded & validated |
 | 10. Link analysis | Maltego-style entity graph (domains→IPs→services→URLs) |
 | 11. Report | The model writes the doctrine-format assessment; rendered into a **graphical HTML dashboard** |
 
-## The graphical HTML report
+## The GUI + the graphical HTML report
 
 Every scan writes `./reports/nightcrawler_<target>_<timestamp>/`:
 

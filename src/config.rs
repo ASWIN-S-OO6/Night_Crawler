@@ -66,8 +66,8 @@ pub struct ScanCfg {
 impl Default for ScanCfg {
     fn default() -> Self {
         ScanCfg {
-            timeout_ms: 2200,
-            max_concurrency: 400,
+            timeout_ms: 1500,
+            max_concurrency: 800,
             http_timeout_ms: 8000,
             max_subdirs: 300,
             max_subdomains: 400,

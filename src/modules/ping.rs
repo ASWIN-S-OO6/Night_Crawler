@@ -1,10 +1,20 @@
 use anyhow::Result;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 use tokio::net::TcpStream;
+
+/// TTL from the last system ICMP ping (used for OS fingerprinting).
+pub static LAST_TTL: AtomicU32 = AtomicU32::new(0);
+
+pub fn last_ttl() -> Option<u32> {
+    let v = LAST_TTL.load(Ordering::Relaxed);
+    if v > 0 { Some(v) } else { None }
+}
 
 /// Liveness probe: system ICMP ping first, fallback to TCP connect ping.
 /// Returns (alive, rtt_ms, method).
 pub async fn check_alive(target: &str, tcp_ports: &[u16]) -> Result<(bool, Option<f64>, String)> {
+    // NOTE: TTL is captured separately via `ping_ttl` for OS fingerprinting.
     // 1. Try system ping (ICMP) — most accurate when available.
     if let Some((ok, rtt)) = icmp_ping(target).await {
         return Ok((ok, rtt, "icmp".into()));
@@ -39,7 +49,16 @@ async fn icmp_ping(target: &str) -> Option<(bool, Option<f64>)> {
         || stdout.contains("1 packets received")
         || stdout.contains("bytes from");
     let rtt = extract_rtt(&stdout);
+    LAST_TTL.store(extract_ttl(&stdout), Ordering::Relaxed);
     Some((success, rtt))
+}
+
+fn extract_ttl(out: &str) -> u32 {
+    // e.g. "ttl=51" / "ttl 128"
+    let re = regex::Regex::new(r"ttl[=\s]+(\d+)").ok();
+    re.and_then(|r| r.captures(out))
+        .and_then(|c| c[1].parse().ok())
+        .unwrap_or(0)
 }
 
 fn extract_rtt(out: &str) -> Option<f64> {

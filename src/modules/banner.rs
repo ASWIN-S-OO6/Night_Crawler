@@ -20,7 +20,29 @@ pub async fn detect_services(
     let mut out: Vec<PortResult> = Vec::new();
     let ports: Vec<u16> = open_ports.iter().take(MAX_PORTS_BANNER).cloned().collect();
 
-    for port in ports {
+    // parallel fingerprinting — order preserved by index
+    use futures::stream::{self, StreamExt};
+    let results: Vec<PortResult> = stream::iter(ports.iter().cloned())
+        .map(|port| {
+            let host = host_header.to_string();
+            async move { probe_one(ip, host, port, http_timeout_ms).await }
+        })
+        .buffer_unordered(24)
+        .collect()
+        .await;
+    let mut by_port: std::collections::HashMap<u16, PortResult> =
+        results.into_iter().map(|p| (p.port, p)).collect();
+    for port in &ports {
+        if let Some(p) = by_port.remove(port) {
+            out.push(p);
+        }
+    }
+    let _ = &out; // (helper below)
+    return Ok(out);
+}
+
+async fn probe_one(ip: IpAddr, host_header: String, port: u16, http_timeout_ms: u64) -> PortResult {
+    {
         let service = service_for_port(port).to_string();
         let mut pr = PortResult {
             port,
@@ -72,12 +94,12 @@ pub async fn detect_services(
 
             if pr.product.is_none() && is_http_port || (banner_text.is_none() && is_http_port) {
                 // plain HTTP first
-                if let Some(h) = http_probe(ip, host_header, port, false, http_timeout_ms).await {
+                if let Some(h) = http_probe(ip, &host_header, port, false, http_timeout_ms).await {
                     pr.service = "http".into();
                     pr.http = Some(h.clone());
                     let b = synth_banner(&h);
                     banner_text = Some(b);
-                } else if let Some(h) = http_probe(ip, host_header, port, true, http_timeout_ms).await {
+                } else if let Some(h) = http_probe(ip, &host_header, port, true, http_timeout_ms).await {
                     pr.service = "https".into();
                     pr.http = Some(h.clone());
                     let b = synth_banner(&h);
@@ -101,7 +123,7 @@ pub async fn detect_services(
 
         // HTTPS catch-up for TLS-only ports that had no plain HTTP
         if pr.http.is_none() && (port == 443 || port == 8443 || port == 4443) {
-            if let Some(h) = http_probe(ip, host_header, port, true, http_timeout_ms).await {
+            if let Some(h) = http_probe(ip, &host_header, port, true, http_timeout_ms).await {
                 pr.service = "https".into();
                 pr.http = Some(h);
             }
@@ -115,10 +137,8 @@ pub async fn detect_services(
                     .collect(),
             );
         }
-        out.push(pr);
+        pr
     }
-
-    Ok(out)
 }
 
 fn synth_banner(h: &HttpInfo) -> String {

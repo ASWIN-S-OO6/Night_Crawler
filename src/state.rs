@@ -77,6 +77,8 @@ pub struct AppState {
     pub agent_reasoning: Vec<String>,
     pub agent_tasks: Vec<AgentTask>,
     pub next_finding_rev: u64,
+    /// false while the GUI setup screen is waiting for a target
+    pub scan_started: bool,
 }
 
 impl AppState {
@@ -94,6 +96,7 @@ impl AppState {
             "Zone Transfer (AXFR)",
             "Subdomain Enumeration",
             "Web & Directory Discovery",
+            "ZAP Web Scan",
             "SNMP Enumeration",
             "LDAP Enumeration",
             "NetBIOS / SMB Enumeration",
@@ -129,6 +132,7 @@ impl AppState {
             agent_reasoning: Vec::new(),
             agent_tasks: Vec::new(),
             next_finding_rev: 0,
+            scan_started: false,
         }
     }
 
@@ -242,6 +246,14 @@ impl SharedState {
     pub fn thinking(&self, on: bool) {
         self.with(|s| {
             s.ai_thinking = on;
+        });
+    }
+
+    pub fn scan_started(&self, target: &str) {
+        self.with(|s| {
+            s.scan_started = true;
+            s.target_label = target.to_string();
+            s.started = Local::now();
         });
     }
 

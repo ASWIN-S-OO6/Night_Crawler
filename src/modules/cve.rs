@@ -76,7 +76,7 @@ pub async fn map_cves(
             continue;
         }
         queries.push((p.to_string(), version.clone()));
-        if queries.len() >= 8 {
+        if queries.len() >= 5 {
             break;
         }
     }

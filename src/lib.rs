@@ -11,3 +11,4 @@ pub mod types;
 pub mod ui;
 pub mod ui_setup;
 pub mod util;
+pub mod gui;

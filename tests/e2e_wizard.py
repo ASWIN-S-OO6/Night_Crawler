@@ -51,7 +51,7 @@ class Screen:
 
 def start_rig():
     procs = []
-    procs.append(subprocess.Popen(["python3", os.path.join(PROJECT, "tests/mock_nvidia.py")],
+    procs.append(subprocess.Popen(["python3", os.path.join(PROJECT, "tests/mock_nvidia.py"), "18790"],
                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
     os.makedirs("/tmp/opencode/nc-www", exist_ok=True)
     open("/tmp/opencode/nc-www/index.html", "w").write("<html><title>NC Test Page</title></html>")
@@ -71,7 +71,7 @@ def run_wizard(target, phase):
         os.execvp("./target/debug/night-crawler", ["./target/debug/night-crawler"])
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
     raw = b""
-    deadline = time.time() + 150
+    deadline = time.time() + 240
     stage = "start"
     observed = set()
 

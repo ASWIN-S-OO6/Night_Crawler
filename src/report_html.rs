@@ -53,6 +53,8 @@ pub fn build_html(results: &ReconResults) -> String {
     h.push_str(&stats_block(results));
     h.push_str(&charts_block(results));
 
+    h.push_str(&host_block(results));
+
     // Executive summary / AI analysis (converted markdown)
     h.push_str(&section_open("Executive Summary / Analysis", "🧠"));
     if let Some(ai) = &results.ai_report {
@@ -77,6 +79,7 @@ pub fn build_html(results: &ReconResults) -> String {
 
     // CVE / exploit references from the CSE
     h.push_str(&cve_block(results));
+    h.push_str(&zap_block(results));
 
     // Ports & services
     h.push_str(&ports_block(results));
@@ -514,6 +517,98 @@ fn findings_block(results: &ReconResults) -> String {
     h + section_close()
 }
 
+/// Enriched host identification — the details the user asked to see.
+fn host_block(results: &ReconResults) -> String {
+    let t = &results.target;
+    let mut h = section_open("Target / Host Identification", "🎯");
+    h += &format!(
+        "<table><tr><th>Property</th><th>Value</th></tr>
+<tr><td>Input</td><td><b>{}</b> ({})</td></tr>
+<tr><td>IP address</td><td>{}</td></tr>
+<tr><td>Hostname</td><td>{}</td></tr>
+<tr><td>Reverse DNS (PTR)</td><td>{}</td></tr>
+<tr><td>OS fingerprint</td><td>{}</td></tr>
+<tr><td>Open ports</td><td>{}</td></tr>
+{}{}{}</table>",
+        html_escape(&t.input),
+        html_escape(&t.input_kind),
+        t.ip.map(|i| i.to_string()).unwrap_or_else(|| "—".into()),
+        html_escape(t.hostname.as_deref().unwrap_or("—")),
+        html_escape(t.reverse_dns.as_deref().unwrap_or("—")),
+        html_escape(t.ttl_guess_os.as_deref().unwrap_or("—")),
+        if t.open_ports.is_empty() {
+            "—".to_string()
+        } else {
+            format!("{} ({})", t.open_ports.len(), t.open_ports.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", "))
+        },
+        if let Some(g) = &t.geo {
+            format!(
+                "<tr><td>Geo / network</td><td>{} · {} · {} <span class='muted'>({} · {})</span></td></tr>",
+                html_escape(g.city.as_deref().unwrap_or("—")),
+                html_escape(g.country.as_deref().unwrap_or("—")),
+                html_escape(g.isp.as_deref().unwrap_or("—")),
+                html_escape(g.org.as_deref().unwrap_or("—")),
+                html_escape(g.asn.as_deref().unwrap_or("—"))
+            )
+        } else {
+            String::new()
+        },
+        if !t.traceroute.is_empty() {
+            format!(
+                "<tr><td>Traceroute</td><td class='muted'>{}</td></tr>",
+                t.traceroute.iter().map(|x| format!("{} ({:.0}ms)", x.ip, x.rtt_ms)).collect::<Vec<_>>().join(" → ")
+            )
+        } else {
+            String::new()
+        },
+        if !t.cert_domains.is_empty() {
+            format!(
+                "<tr><td>TLS certificate domains</td><td class='muted'>{}</td></tr>",
+                html_escape(&t.cert_domains.join(", "))
+            )
+        } else {
+            String::new()
+        },
+    );
+    h + section_close()
+}
+
+/// ZAP-style web application alerts.
+fn zap_block(results: &ReconResults) -> String {
+    if results.webscan.is_empty() {
+        return String::new();
+    }
+    let total: usize = results.webscan.iter().map(|s| s.alerts.len()).sum();
+    if total == 0 {
+        return String::new();
+    }
+    let mut h = section_open(&format!("Web Application Scan (ZAP-style) — {} alerts", total), "🕸");
+    for scan in &results.webscan {
+        if scan.alerts.is_empty() {
+            continue;
+        }
+        h += &format!("<h3 class='sub'>{}</h3><table><tr><th>Risk</th><th>Plugin</th><th>Detail</th><th>Solution</th></tr>", html_escape(&scan.url));
+        for a in &scan.alerts {
+            let color = match a.risk.as_str() {
+                "High" => "#ef4444",
+                "Medium" => "#f97316",
+                "Low" => "#fbbf24",
+                _ => "#475569",
+            };
+            h += &format!(
+                "<tr><td><span class='chip' style='background:{}'>{}</span></td><td><b>{}</b></td><td>{}</td><td class='muted'>{}</td></tr>",
+                color,
+                html_escape(&a.risk),
+                html_escape(&a.plugin),
+                html_escape(&a.detail),
+                html_escape(&a.solution)
+            );
+        }
+        h += "</table>";
+    }
+    h + section_close()
+}
+
 fn cve_block(results: &ReconResults) -> String {
     if results.cves.is_empty() && results.cve_refs.is_empty() {
         return String::new();
@@ -846,36 +941,60 @@ fn footer_block(results: &ReconResults) -> String {
 // mini markdown → HTML (for the NightCrawler-written analysis)
 // ---------------------------------------------------------------------------
 
-/// Small, dependency-free markdown renderer for the agent's report:
-/// headings, bold/italic, inline code, fenced code, links, lists,
-/// pipe tables, paragraphs.
+/// Small, dependency-free markdown renderer for the agent-written
+/// analysis: headings (with anchors), fenced code, bold/italic/links/code,
+/// ordered + unordered lists (incl. nested one level), pipe tables,
+/// blockquotes and paragraphs.
 pub fn md_to_html(md: &str) -> String {
     let esc = html_escape;
     let inline = |s: &str| -> String {
         let mut out = esc(s);
         // links [text](url)
-        let re = regex::Regex::new(r"\[([^\]]+)\]\(([^)\s]+)\)").unwrap();
-        out = re
-            .replace_all(&out, "<a href=\"$2\" target=\"_blank\">$1</a>")
-            .to_string();
-        // bold
-        let re = regex::Regex::new(r"\*\*([^*]+)\*\*").unwrap();
-        out = re.replace_all(&out, "<b>$1</b>").to_string();
-        // inline code
-        let re = regex::Regex::new(r"`([^`]+)`").unwrap();
-        out = re.replace_all(&out, "<code>$1</code>").to_string();
+        if let Ok(re) = regex::Regex::new(r"\[([^\]]+)\]\(([^)\s]+)\)") {
+            out = re.replace_all(&out, "<a href=\"$2\" target=\"_blank\">$1</a>").to_string();
+        }
+        // inline code first (so ** inside code is untouched would be ideal; keep simple)
+        if let Ok(re) = regex::Regex::new(r"`([^`]+)`") {
+            out = re.replace_all(&out, "<code>$1</code>").to_string();
+        }
+        if let Ok(re) = regex::Regex::new(r"\*\*([^*]+)\*\*") {
+            out = re.replace_all(&out, "<b>$1</b>").to_string();
+        }
+        if let Ok(re) = regex::Regex::new(r"(?<!\*)\*([^*\n]+)\*(?!\*)") {
+            out = re.replace_all(&out, "<i>$1</i>").to_string();
+        }
         out
     };
+    let slug = |s: &str| -> String {
+        let collapsed: String = s
+            .to_ascii_lowercase()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { ' ' })
+            .collect();
+        collapsed
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join("-")
+    };
 
-    let mut html = String::new();
     let lines: Vec<&str> = md.lines().collect();
+    let mut html = String::new();
     let mut i = 0;
-    let mut list_open = false;
+
+    let close_list = |html: &mut String, open: &mut Option<&'static str>| {
+        if let Some(tag) = open.take() {
+            html.push_str(&format!("</{}>", tag));
+        }
+    };
+
+    let mut list_open: Option<&'static str> = None;
     while i < lines.len() {
-        let line = lines[i].trim();
+        let raw = lines[i];
+        let line = raw.trim();
 
         // fenced code
         if line.starts_with("```") {
+            close_list(&mut html, &mut list_open);
             let mut code = String::new();
             i += 1;
             while i < lines.len() && !lines[i].trim_start().starts_with("```") {
@@ -883,97 +1002,163 @@ pub fn md_to_html(md: &str) -> String {
                 code.push('\n');
                 i += 1;
             }
-            i += 1;
-            html += &format!("<pre><code>{}</code></pre>", esc(&code));
+            i += 1; // closing fence
+            html.push_str(&format!("<pre><code>{}</code></pre>", esc(&code)));
             continue;
         }
-        // table
-        if line.starts_with('|') && i + 1 < lines.len() && lines[i + 1].trim().starts_with("|--") == false && lines[i+1].contains("--") && lines[i+1].starts_with('|') {
-            // header | separator | rows
-            let mut rows: Vec<String> = Vec::new();
-            let hdr: Vec<String> = line.trim_matches('|').split('|').map(|c| c.trim().to_string()).collect();
-            let mut j = i + 2;
-            while j < lines.len() && lines[j].trim_start().starts_with('|') {
-                let cells: Vec<String> = lines[j].trim().trim_matches('|').split('|').map(|c| c.trim().to_string()).collect();
-                rows.push(cells.join("\u{1}")); // cell separator
-                j += 1;
-            }
-            html += "<table><tr>";
-            for hcell in &hdr {
-                html += &format!("<th>{}</th>", inline(hcell));
-            }
-            html += "</tr>";
-            for r in rows {
-                html += "<tr>";
-                for cell in r.split('\u{1}') {
-                    html += &format!("<td>{}</td>", inline(cell));
+
+        // table: | header | ... | followed by |---|---|
+        if line.starts_with('|') && i + 1 < lines.len() {
+            let sep = lines[i + 1].trim();
+            let is_sep = sep.starts_with('|')
+                && sep.replace(['-', ':', '|', ' '], "").is_empty()
+                && sep.contains('-');
+            if is_sep {
+                close_list(&mut html, &mut list_open);
+                let hdr: Vec<&str> = line.trim_matches('|').split('|').map(|c| c.trim()).collect();
+                html.push_str("<table><tr>");
+                for h in &hdr {
+                    html.push_str(&format!("<th>{}</th>", inline(h)));
                 }
-                html += "</tr>";
-            }
-            html += "</table>";
-            i = j;
-            continue;
-        }
-        // headings
-        if let Some(rest) = line.strip_prefix("### ") {
-            if list_open { html += "</ul>"; list_open = false; }
-            html += &format!("<h3 class='sub'>{}</h3>", inline(rest));
-            i += 1;
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix("## ") {
-            if list_open { html += "</ul>"; list_open = false; }
-            html += &format!("<h2 style='color:#e879f9'>{}</h2>", inline(rest));
-            i += 1;
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix("# ") {
-            if list_open { html += "</ul>"; list_open = false; }
-            html += &format!("<h2>{}</h2>", inline(rest));
-            i += 1;
-            continue;
-        }
-        // lists
-        if line.starts_with("- ") || line.starts_with("* ") {
-            if !list_open {
-                html += "<ul>";
-                list_open = true;
-            }
-            html += &format!("<li>{}</li>", inline(&line[2..]));
-            i += 1;
-            continue;
-        }
-        if let Some(n) = line.chars().next() {
-            if n.is_ascii_digit() && line[1..].starts_with(". ") || (line.len() > 1 && line[..2].chars().all(|c| c.is_ascii_digit()) && line[2..].starts_with(". ")) {
-                if !list_open {
-                    html += "<ul style='list-style:disc'>";
-                    list_open = true;
+                html.push_str("</tr>");
+                let mut j = i + 2;
+                while j < lines.len() && lines[j].trim_start().starts_with('|') {
+                    let cells: Vec<&str> = lines[j]
+                        .trim()
+                        .trim_matches('|')
+                        .split('|')
+                        .map(|c| c.trim())
+                        .collect();
+                    html.push_str("<tr>");
+                    for c in &cells {
+                        html.push_str(&format!("<td>{}</td>", inline(c)));
+                    }
+                    html.push_str("</tr>");
+                    j += 1;
                 }
-                let item = line.split_once(". ").map(|x| x.1).unwrap_or(line);
-                html += &format!("<li>{}</li>", inline(item));
-                i += 1;
+                html.push_str("</table>");
+                i = j;
                 continue;
             }
         }
-        // blank
-        if line.is_empty() {
-            if list_open {
-                html += "</ul>";
-                list_open = false;
-            }
+
+        // headings
+        let heading = |prefix: &str| -> Option<&str> { line.strip_prefix(prefix) };
+        if let Some(rest) = heading("#### ") {
+            close_list(&mut html, &mut list_open);
+            html.push_str(&format!("<h4 id='{}'>{}</h4>", slug(rest), inline(rest)));
             i += 1;
             continue;
         }
-        // paragraph
-        if list_open {
-            html += "</ul>";
-            list_open = false;
+        if let Some(rest) = heading("### ") {
+            close_list(&mut html, &mut list_open);
+            html.push_str(&format!("<h3 class='sub' id='{}'>{}</h3>", slug(rest), inline(rest)));
+            i += 1;
+            continue;
         }
-        html += &format!("<p>{}</p>", inline(line));
+        if let Some(rest) = heading("## ") {
+            close_list(&mut html, &mut list_open);
+            html.push_str(&format!("<h2 id='{}'>{}</h2>", slug(rest), inline(rest)));
+            i += 1;
+            continue;
+        }
+        if let Some(rest) = heading("# ") {
+            close_list(&mut html, &mut list_open);
+            html.push_str(&format!("<h2 id='{}'>{}</h2>", slug(rest), inline(rest)));
+            i += 1;
+            continue;
+        }
+
+        // horizontal rule
+        if line == "---" || line == "***" {
+            close_list(&mut html, &mut list_open);
+            html.push_str("<hr>");
+            i += 1;
+            continue;
+        }
+
+        // ordered list
+        let ord = line
+            .find(". ")
+            .filter(|p| *p < 4 && line[..*p].chars().all(|c| c.is_ascii_digit()) && !line[..*p].is_empty());
+        if let Some(p) = ord {
+            if list_open != Some("ol") {
+                close_list(&mut html, &mut list_open);
+                html.push_str("<ol>");
+                list_open = Some("ol");
+            }
+            html.push_str(&format!("<li>{}</li>", inline(&line[p + 2..])));
+            i += 1;
+            continue;
+        }
+
+        // unordered list
+        if line.starts_with("- ") || line.starts_with("* ") {
+            if list_open != Some("ul") {
+                close_list(&mut html, &mut list_open);
+                html.push_str("<ul>");
+                list_open = Some("ul");
+            }
+            html.push_str(&format!("<li>{}</li>", inline(&line[2..])));
+            i += 1;
+            continue;
+        }
+
+        // blank
+        if line.is_empty() {
+            close_list(&mut html, &mut list_open);
+            i += 1;
+            continue;
+        }
+
+        // blockquote
+        if let Some(rest) = line.strip_prefix("> ") {
+            close_list(&mut html, &mut list_open);
+            html.push_str(&format!("<blockquote>{}</blockquote>", inline(rest)));
+            i += 1;
+            continue;
+        }
+
+        // paragraph
+        close_list(&mut html, &mut list_open);
+        html.push_str(&format!("<p>{}</p>", inline(line)));
         i += 1;
     }
-    if list_open {
-        html += "</ul>";
-    }
+    close_list(&mut html, &mut list_open);
     html
+}
+
+#[cfg(test)]
+mod md_tests {
+    use super::*;
+
+    #[test]
+    fn full_document() {
+        let md = "# Executive Summary\n\nThe host is exposed.\n\n## Attack Paths\n\n- Step one: run `nmap`\n- Step two: exploit CVE-2024-1\n\n1. First\n2. Second\n\n| Port | Service |\n|---|---|\n| 80 | http |\n| 443 | https |\n";
+        let h = md_to_html(md);
+        assert!(h.contains("id='executive-summary'"));
+        assert!(h.contains("<p>The host is exposed.</p>"));
+        assert!(h.contains("<ul><li>Step one: run <code>nmap</code></li>"));
+        assert!(h.contains("<ol><li>First</li><li>Second</li></ol>"));
+        assert!(h.contains("<th>Port</th>"));
+        assert!(h.contains("<td>http</td>"));
+    }
+
+    #[test]
+    fn headings_have_content_below() {
+        // regression for the "headings with no content" bug: lists directly
+        // after a heading must render
+        let md = "## Findings\n\n### [High] Broken thing\n\n- **Confidence:** CONFIRMED\n- **Affected:** 80/tcp\n";
+        let h = md_to_html(md);
+        assert!(h.contains("id='findings'"));
+        assert!(h.contains("id='high-broken-thing'"));
+        assert!(h.contains("<li><b>Confidence:</b> CONFIRMED</li>"));
+    }
+
+    #[test]
+    fn code_fence_and_bold() {
+        let h = md_to_html("## Exploit\n\n```bash\nsqlmap -u x\n```\n\nUse **now**.");
+        assert!(h.contains("<pre><code>sqlmap -u x\n</code></pre>"));
+        assert!(h.contains("<b>now</b>"));
+    }
 }

@@ -31,6 +31,44 @@ impl Severity {
     }
 }
 
+/// One ZAP-style web alert.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebAlert {
+    pub plugin: String,
+    pub risk: String, // High | Medium | Low | Informational
+    pub confidence: String,
+    pub url: String,
+    pub detail: String,
+    pub solution: String,
+    pub reference: Option<String>,
+}
+
+/// Full ZAP-style web scan of one endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebScanResult {
+    pub url: String,
+    pub alerts: Vec<WebAlert>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TraceHop {
+    pub ttl: u8,
+    pub ip: String,
+    pub host: String,
+    pub rtt_ms: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GeoInfo {
+    pub query: String,
+    pub country: Option<String>,
+    pub region: Option<String>,
+    pub city: Option<String>,
+    pub isp: Option<String>,
+    pub org: Option<String>,
+    pub asn: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Meta {
     pub tool: String,
@@ -54,6 +92,13 @@ pub struct TargetInfo {
     pub rtt_ms: Option<f64>,
     pub ptr_domains: Vec<String>,
     pub cert_domains: Vec<String>,
+    // enriched host identification
+    pub ttl_guess_os: Option<String>,
+    pub ttl_value: Option<u32>,
+    pub traceroute: Vec<TraceHop>,
+    pub geo: Option<GeoInfo>,
+    pub open_ports: Vec<u16>,
+    pub mac_address: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -258,6 +303,7 @@ pub struct ReconResults {
     pub subdomains: Vec<SubdomainResult>,
     pub subdirs: Vec<DirResult>,
     pub http: Vec<HttpInfo>,
+    pub webscan: Vec<WebScanResult>,
     pub snmp: Option<SnmpResults>,
     pub ldap: Option<LdapResults>,
     pub netbios: Option<NbnsResults>,

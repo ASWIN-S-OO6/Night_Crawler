@@ -48,9 +48,17 @@ struct Cli {
     #[arg(long)]
     no_ai: bool,
 
-    /// Plain log output instead of the full TUI
+    /// Plain log output instead of the GUI
     #[arg(long)]
     no_tui: bool,
+
+    /// Force the terminal UI instead of the browser GUI
+    #[arg(long)]
+    tui: bool,
+
+    /// GUI port (default 7655)
+    #[arg(long, default_value = "7655")]
+    port: u16,
 
     /// Don't expand an IP target into domain-based phases via PTR/cert pivots
     #[arg(long)]
@@ -166,10 +174,14 @@ fn main() -> Result<()> {
             };
             (target, nv, "prompt".into())
         }
+        (None, _, false) if !cli.no_tui => {
+            // GUI mode: the browser setup form supplies the target
+            (String::new(), None, "gui-setup".into())
+        }
         (None, _, false) => {
-            // non-interactive and no target: nothing to do
-            eprintln!("no target provided (and no terminal for the wizard)");
-            eprintln!("usage: night-crawler <ip|domain>   — or run in a terminal for the setup wizard");
+            // --no-tui and non-interactive: nothing to do
+            eprintln!("no target provided — GUI disabled with --no-tui");
+            eprintln!("usage: night-crawler <ip|domain>   — or drop --no-tui for the browser GUI");
             return Ok(());
         }
     };
@@ -251,8 +263,8 @@ fn prompt(label: &str) -> String {
 
 fn run_scan_and_finish(
     rt: &tokio::runtime::Runtime,
-    target: String,
-    nv: Option<ai::NvClient>,
+    mut target: String,
+    mut nv: Option<ai::NvClient>,
     provider_desc: String,
     cli: &Cli,
     cfg: &config::Config,
@@ -267,11 +279,69 @@ fn run_scan_and_finish(
         output_dir: cli.output.clone(),
     };
 
+    let use_tui = cli.tui && std::io::stdout().is_terminal() && cli.target.is_some();
+    let use_gui = !cli.no_tui && !use_tui;
+    let _ = provider_desc;
+
+    // Single shared state for the whole run (GUI setup + scan + report)
     let shared = state::SharedState::new(target.clone());
     let shared_ui = shared.clone();
 
-    let use_tui = !cli.no_tui && std::io::stdout().is_terminal();
-    let _ = provider_desc;
+    // ------------------------------------------------------------------
+    // GUI mode: browser-first. Setup form -> live scan -> report.
+    // ------------------------------------------------------------------
+    if use_gui {
+        night_crawler::gui::set_gui_port(cli.port);
+        let gui_shared = shared.clone();
+        rt.spawn(async move {
+            if let Err(e) = night_crawler::gui::serve(gui_shared).await {
+                eprintln!("\x1b[33mGUI unavailable: {} — falling back to plain output\x1b[0m", e);
+            }
+        });
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        night_crawler::gui::open_browser(night_crawler::gui::gui_port());
+        println!(
+            "\x1b[1;35m🕷 Night Crawler GUI: http://127.0.0.1:{}\x1b[0m",
+            night_crawler::gui::gui_port()
+        );
+
+        // no target yet: wait for the browser form to submit one
+        if target.is_empty() {
+            loop {
+                if let Some(req) = night_crawler::gui::take_pending_start() {
+                    target = req.target;
+                    if !req.provider.is_empty() {
+                        nv = match config::resolve_provider_input(&req.provider) {
+                            Ok(setup) => {
+                                let mut client = night_crawler::ai::NvClient::new(
+                                    &setup.base_url, &setup.api_key, "",
+                                );
+                                match rt.block_on(client.connect_and_select(setup.model.clone())) {
+                                    Ok((_, sel)) => {
+                                        eprintln!("\x1b[1;32m[*] {}\x1b[0m", sel.note);
+                                        Some(client)
+                                    }
+                                    Err(e) => {
+                                        eprintln!("\x1b[33m[!] agent unavailable: {}\x1b[0m", e);
+                                        None
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("\x1b[33m[!] provider input invalid: {}\x1b[0m", e);
+                                None
+                            }
+                        };
+                    }
+                    shared.scan_started(&target);
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+        } else {
+            shared.scan_started(&target);
+        }
+    }
 
     let shared_scan = shared.clone();
     let scan_nv = nv.clone();
@@ -292,8 +362,12 @@ fn run_scan_and_finish(
     };
 
     let handle = rt.spawn(async move {
-        orchestrator::run_scan(&scan_target, &scan_opts, &cfg_clone, shared_scan, scan_nv).await
+        let scan_target_ref = scan_target.clone();
+        let scan_opts_ref = scan_opts.clone();
+        let cfg_ref = cfg_clone.clone();
+        orchestrator::run_scan(&scan_target_ref, &scan_opts_ref, &cfg_ref, shared_scan, scan_nv).await
     });
+
 
     let user_quit = if use_tui {
         let mut tui = ui::init()?;
@@ -315,6 +389,24 @@ fn run_scan_and_finish(
                 false
             }
         }
+    } else if use_gui {
+        // the GUI server is already running (started in the browser-first
+        // block above) — just hold the process so the dashboard + report
+        // stay viewable; user presses Ctrl-C when done
+        rt.block_on(async {
+            loop {
+                if shared_ui.state.lock().unwrap().done {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+            }
+        });
+        println!(
+            "\x1b[2mGUI stays live at http://127.0.0.1:{} — press Ctrl-C to exit\x1b[0m",
+            night_crawler::gui::gui_port()
+        );
+        rt.block_on(std::future::pending::<()>());
+        false
     } else {
         rt.block_on(ui::plain_watch(shared_ui.clone()));
         false

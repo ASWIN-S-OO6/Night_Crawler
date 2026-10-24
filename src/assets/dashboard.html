@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>🕷 Night Crawler — Live</title>
+<style>
+:root { --bg:#0a0e14; --panel:#111827; --border:#1f2b3d; --text:#e2e8f0;
+  --muted:#8b9bb4; --accent:#d946ef; --cyan:#22d3ee; --green:#34d399;
+  --red:#f87171; --yellow:#fbbf24; }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--text);
+  font:14px/1.5 'Segoe UI',system-ui,sans-serif; }
+.wrap { max-width:1280px; margin:0 auto; padding:18px 20px 50px; }
+a { color:var(--cyan); text-decoration:none; }
+.header { background:linear-gradient(120deg,#1b0b23,#0a1a2e); border:1px solid #2c1f3d;
+  border-radius:14px; padding:18px 22px; margin-bottom:16px;
+  display:flex; justify-content:space-between; flex-wrap:wrap; gap:10px; align-items:center; }
+.header h1 { margin:0; font-size:22px; letter-spacing:.5px;
+  background:linear-gradient(90deg,#e879f9,#22d3ee); -webkit-background-clip:text;
+  background-clip:text; color:transparent; }
+.meta { display:flex; gap:16px; flex-wrap:wrap; font-size:13px; color:#b7c3d7; }
+.meta b { color:#fff; }
+.grid { display:grid; grid-template-columns:340px 1fr 1.2fr; gap:14px; margin-bottom:16px; }
+@media (max-width:1100px){ .grid{ grid-template-columns:1fr; } }
+.panel { background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:14px 16px; }
+.panel h2 { margin:0 0 10px; font-size:14px; text-transform:uppercase; letter-spacing:1px;
+  color:#93a6c1; border-bottom:1px solid var(--border); padding-bottom:8px; }
+.phase { display:flex; gap:8px; padding:3px 0; font-size:13px; align-items:center; }
+.phase .n { color:var(--muted); width:22px; text-align:right; }
+.phase .ic { width:18px; text-align:center; }
+.done { color:var(--green); } .running { color:var(--accent); font-weight:600; }
+.skipped { color:var(--muted); } .failed { color:var(--red); } .pending { color:#4b5563; }
+.sum { color:var(--muted); font-size:11.5px; margin-left:2px; }
+.finding { padding:5px 0; border-bottom:1px solid #17202e; font-size:13px; }
+.sev { display:inline-block; min-width:44px; text-align:center; border-radius:10px;
+  font-size:10.5px; font-weight:700; padding:1px 6px; margin-right:8px; color:#0a0e14; }
+.CRIT { background:#ef4444; } .HIGH { background:#f97316; }
+.MED { background:#fbbf24; } .LOW { background:#22d3ee; } .INFO { background:#475569; color:#cbd5e1; }
+.agent-line { font-size:13px; padding:3px 0; }
+.task { display:flex; gap:8px; font-size:13px; padding:2px 0; }
+.reason { font-size:12.5px; color:#cbd5e1; padding:2px 0 2px 14px; border-left:2px solid #2c1f3d; margin:2px 0; }
+.reason::before { content:"» "; color:var(--muted); }
+.log { font-size:11.5px; color:var(--green); padding:1px 0; font-family:ui-monospace,monospace; }
+.bar { position:sticky; top:8px; z-index:5; background:var(--panel); border:1px solid var(--border);
+  border-radius:10px; padding:10px 16px; margin-bottom:16px; display:flex; gap:14px; align-items:center; flex-wrap:wrap; }
+.track { flex:1; height:12px; background:#0a0e14; border-radius:6px; overflow:hidden; min-width:200px; }
+.fill { height:100%; background:linear-gradient(90deg,#d946ef,#22d3ee); width:0%; transition:width .4s; }
+.thinking { color:var(--accent); font-size:13px; }
+.done-banner { background:var(--panel); border:1px solid var(--green); border-radius:12px;
+  padding:16px 20px; margin-bottom:16px; text-align:center; }
+.done-banner a.btn { display:inline-block; margin-top:10px; background:linear-gradient(90deg,#d946ef,#22d3ee);
+  color:#0a0e14; font-weight:700; padding:10px 22px; border-radius:8px; text-decoration:none; }
+.spinner { display:inline-block; animation:spin 1s steps(10) infinite; }
+@keyframes spin { 0%{transform:rotate(0)} 100%{transform:rotate(360deg)} }
+.pulse { animation:pulse 1.6s ease infinite; }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.45} }
+</style>
+</head>
+<body><div class="wrap">
+<div class="header">
+  <div>
+    <h1>🕷 Night Crawler — Live Recon</h1>
+    <div class="meta"><span>target: <b id="target">…</b></span>
+      <span>agent: <b id="model">…</b></span>
+      <span>elapsed: <b id="elapsed">0s</b></span></div>
+  </div>
+  <div class="meta" id="stats"></div>
+</div>
+
+<div id="donebox" style="display:none" class="done-banner">
+  <h2 style="border:none;color:var(--green)">✔ Scan complete</h2>
+  <a class="btn" href="/report" target="_blank">Open the full graphical report ↗</a>
+</div>
+
+<div id="setupbox" class="panel" style="display:none;max-width:520px;margin:0 auto 16px;text-align:center">
+  <h2 style="border:none;color:#cbd5e1;text-align:center">Start a scan</h2>
+  <form onsubmit="return startScan(event)">
+    <input id="inp-target" placeholder="Target: IP or domain (e.g. scanme.nmap.org)" required
+      style="width:100%;padding:12px 14px;margin:8px 0;background:#0a0e14;color:#e2e8f0;border:1px solid #2c3e55;border-radius:8px;font-size:15px">
+    <input id="inp-provider" placeholder="NVIDIA key or provider config path (optional — saved agent is reused)"
+      style="width:100%;padding:12px 14px;margin:8px 0;background:#0a0e14;color:#e2e8f0;border:1px solid #2c3e55;border-radius:8px;font-size:13px">
+    <button type="submit" style="width:100%;padding:12px;margin-top:8px;background:linear-gradient(90deg,#d946ef,#22d3ee);color:#0a0e14;font-weight:700;border:none;border-radius:8px;font-size:15px;cursor:pointer">🕷 Start the autonomous scan</button>
+  </form>
+  <div id="setup-msg" style="color:var(--yellow);font-size:13px;margin-top:8px"></div>
+</div>
+
+<div id="mainview">
+<div class="bar" id="bar">
+  <span id="phase-now" class="thinking">starting…</span>
+  <div class="track"><div class="fill" id="fill"></div></div>
+  <span id="pct" class="meta">0%</span>
+</div>
+
+<div class="grid">
+  <div class="panel"><h2>Phases</h2><div id="phases"></div></div>
+  <div class="panel"><h2>🕷 NightCrawler Brain</h2>
+    <div id="agent-state" class="agent-line">…</div>
+    <div id="tasks"></div>
+    <h2 style="margin-top:12px">Reasoning</h2><div id="reasoning"></div></div>
+  <div class="panel"><h2>Findings</h2><div id="findings"></div>
+    <h2 style="margin-top:12px">Activity</h2><div id="logs"></div></div>
+</div>
+</div>
+</div>
+
+<script>
+const SPIN = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏'];
+let spinI = 0;
+function icon(st) {
+  if (st === 'done') return '✔';
+  if (st === 'running') return `<span class="spinner">${SPIN[spinI % 10]}</span>`;
+  if (st === 'skipped') return '–';
+  if (st === 'failed') return '✖';
+  return '◌';
+}
+function showSetup(show) {
+  document.getElementById('setupbox').style.display = show ? 'block' : 'none';
+  document.getElementById('mainview').style.display = show ? 'none' : 'block';
+  document.getElementById('donebox').style.display = 'none';
+}
+async function startScan(ev) {
+  ev.preventDefault();
+  const target = document.getElementById('inp-target').value.trim();
+  const provider = document.getElementById('inp-provider').value.trim();
+  const msg = document.getElementById('setup-msg');
+  msg.textContent = 'starting…';
+  await fetch('/start', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
+    body: 'target=' + encodeURIComponent(target) + '&provider=' + encodeURIComponent(provider)});
+  showSetup(false);
+  startedAt = Date.now();
+  return false;
+}
+let startedAt = null;
+async function tick() {
+  spinI++;
+  try {
+    const s = await (await fetch('/state')).json();
+    if (!s.scan_started) { showSetup(true); document.getElementById('model').textContent = 'waiting for target…'; return; }
+    showSetup(false);
+    document.getElementById('target').textContent = s.target || '—';
+    document.getElementById('model').textContent = (s.model || 'agent offline').replace('🤖 ','');
+    document.getElementById('elapsed').textContent = s.elapsed + 's';
+    const st = [];
+    for (const [k, v] of Object.entries(s.stats || {})) st.push(`<span>${k}: <b>${v}</b></span>`);
+    document.getElementById('stats').innerHTML = st.join(' ');
+
+    let doneN = 0;
+    document.getElementById('phases').innerHTML = (s.phases || []).map(p => {
+      if (p.status === 'done') doneN++;
+      const cls = p.status;
+      const extra = (p.status === 'skipped' || p.status === 'failed') && p.detail ? ` <span class="sum">(${p.detail})</span>` : '';
+      return `<div class="phase ${cls}"><span class="ic">${icon(p.status)}</span><span>${p.name}${p.summary ? `<span class="sum"> ${p.summary}</span>` : ''}${extra}</span></div>`;
+    }).join('');
+    const total = Math.max((s.phases || []).length, 1);
+    const pct = Math.round(100 * doneN / total);
+    const prog = s.progress;
+    document.getElementById('fill').style.width = pct + '%';
+    document.getElementById('pct').textContent = pct + '%';
+    const runningNow = (s.phases || []).filter(p => p.status === 'running').map(p => p.name).join(', ');
+    document.getElementById('phase-now').innerHTML = prog
+      ? `${icon('running')} ${prog.label} ${prog.current}/${prog.total}`
+      : (runningNow ? `${icon('running')} ${runningNow}` : (s.done ? 'complete' : 'working…'));
+
+    document.getElementById('agent-state').innerHTML =
+      s.thinking ? `<span class="thinking pulse">${icon('running')} NightCrawler is reasoning over the evidence…</span>`
+                 : (s.done ? '✔ assessment complete' : '▶ acting');
+    document.getElementById('tasks').innerHTML = (s.tasks || []).map(t =>
+      `<div class="task ${t.status}"><span class="ic">${icon(t.status)}</span>${t.name}</div>`).join('');
+    document.getElementById('reasoning').innerHTML = (s.reasoning || []).slice(-10).map(r =>
+      `<div class="reason">${r}</div>`).join('');
+
+    document.getElementById('findings').innerHTML = (s.findings || []).slice(-60).map(f =>
+      `<div class="finding"><span class="sev ${f.severity}">${f.severity}</span><b>${f.category}</b> ${escapeHtml(f.title)}</div>`).join('')
+      || '<div class="finding">no findings yet…</div>';
+    document.getElementById('logs').innerHTML = (s.logs || []).slice(-25).map(l =>
+      `<div class="log">· ${escapeHtml(l)}</div>`).join('');
+
+    if (s.done) {
+      document.getElementById('donebox').style.display = 'block';
+      if (!window.openedReport) { window.openedReport = true; }
+    }
+  } catch (e) { /* server restarting between scans */ }
+}
+function escapeHtml(s) {
+  return (s || '').replace(/&/g,'&').replace(/</g,'<').replace(/>/g,'>');
+}
+tick();
+setInterval(tick, 700);
+</script>
+</body></html>

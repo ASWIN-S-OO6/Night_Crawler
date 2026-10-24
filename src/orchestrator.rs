@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 /// Fully autonomous scan options. Everything here is a *hint*; the AI
 /// decides the actual strategy at each phase when connected.
+#[derive(Clone)]
 pub struct Opts {
     /// None = NightCrawler decides the port strategy (or "top" without a model).
     pub ports_spec: Option<String>,
@@ -131,6 +132,19 @@ fn evidence_snapshot(results: &ReconResults) -> Value {
         "dork_hits": results.dorks.iter().map(|d| serde_json::json!({
             "query": d.query, "results": d.results.len(),
         })).collect::<Vec<_>>(),
+        "host": {
+            "os_fingerprint": results.target.ttl_guess_os,
+            "ttl": results.target.ttl_value,
+            "geo": results.target.geo,
+            "traceroute_hops": results.target.traceroute.iter().map(|h| h.ip.clone()).collect::<Vec<_>>(),
+            "open_ports": results.target.open_ports,
+        },
+        "zap_alerts": results.webscan.iter().map(|s| serde_json::json!({
+            "url": s.url,
+            "alerts": s.alerts.iter().map(|a| serde_json::json!({
+                "plugin": a.plugin, "risk": a.risk, "detail": a.detail,
+            })).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
     })
 }
 
@@ -141,6 +155,24 @@ pub async fn run_scan(
     shared: Arc<SharedState>,
     nv: Option<NvClient>,
 ) -> Result<ReconResults> {
+    // clone before the first await so the borrowed parameters are not held
+    // across await points (keeps the spawned future Send)
+    let target = target_str.to_string();
+    let o = opts.clone();
+    let c = cfg.clone();
+    run_scan_inner(target, o, c, shared, nv).await
+}
+
+async fn run_scan_inner(
+    target_str: String,
+    opts: Opts,
+    cfg: Config,
+    shared: Arc<SharedState>,
+    nv: Option<NvClient>,
+) -> Result<ReconResults> {
+    let opts = &opts;
+    let cfg = &cfg;
+    let target_str = &target_str;
     let started = Instant::now();
     let scan_cfg: &ScanCfg = &cfg.scan;
     let mut g = GraphBuilder::new();
@@ -194,6 +226,12 @@ pub async fn run_scan(
             rtt_ms: None,
             ptr_domains: Vec::new(),
             cert_domains: Vec::new(),
+            ttl_guess_os: None,
+            ttl_value: None,
+            traceroute: Vec::new(),
+            geo: None,
+            open_ports: Vec::new(),
+            mac_address: None,
         }
     } else {
         let ips = modules::dnsrecon::resolve_a(&resolver, &target_str_clean).await;
@@ -218,6 +256,12 @@ pub async fn run_scan(
             rtt_ms: None,
             ptr_domains: Vec::new(),
             cert_domains: Vec::new(),
+            ttl_guess_os: None,
+            ttl_value: None,
+            traceroute: Vec::new(),
+            geo: None,
+            open_ports: Vec::new(),
+            mac_address: None,
         }
     };
 
@@ -272,9 +316,17 @@ pub async fn run_scan(
     target.alive = alive;
     target.rtt_ms = rtt;
     target.liveness_method = method.clone();
+    // Host identification enrichment: OS fingerprint, traceroute, geo/ASN
+    let _ = modules::hostinfo::enrich_target(&mut target, &[], modules::ping::last_ttl()).await;
+    if let Some(os) = &target.ttl_guess_os {
+        shared.log(format!("host fingerprint: {} (TTL {})", os, target.ttl_value.unwrap_or(0)));
+    }
     if alive {
         let rtt_s = rtt.map(|r| format!(" rtt {:.1}ms", r)).unwrap_or_default();
         shared.finding(Severity::Info, "host", &format!("Host is up ({}){}", method, rtt_s));
+        if let Some(os) = &target.ttl_guess_os {
+            shared.finding(Severity::Info, "host", &format!("OS fingerprint: {}", os));
+        }
         shared.done("Host Liveness", &format!("up ({}){}", method, rtt_s));
     } else {
         shared.finding(
@@ -483,6 +535,7 @@ pub async fn run_scan(
     }
 
     let mut results_cves: Vec<CveEntry> = Vec::new();
+    let mut webscan_results: Vec<WebScanResult> = Vec::new();
 
     // ------------------------------------------------------------------
     // Phase 6: Vulnerability fingerprinting
@@ -576,6 +629,45 @@ pub async fn run_scan(
         }
     }
 
+    // full host enrichment now that ports are known
+    {
+        let mut t = target.clone();
+        let _ = modules::hostinfo::enrich_target(&mut t, &open_ports, modules::ping::last_ttl()).await;
+        target = t;
+    }
+    if let Some(geo) = &target.geo {
+        shared.log(format!(
+            "geo: {} · {} · isp {} · {}",
+            geo.city.clone().unwrap_or_default(),
+            geo.country.clone().unwrap_or_default(),
+            geo.isp.clone().unwrap_or_default(),
+            geo.asn.clone().unwrap_or_default()
+        ));
+        shared.finding(
+            Severity::Info,
+            "host",
+            &format!(
+                "host located: {} · {} · {} ({})",
+                geo.city.clone().unwrap_or_default(),
+                geo.country.clone().unwrap_or_default(),
+                geo.org.clone().unwrap_or_default(),
+                geo.asn.clone().unwrap_or_default()
+            ),
+        );
+    }
+    if !target.traceroute.is_empty() {
+        shared.log(format!(
+            "traceroute: {} hops — {}",
+            target.traceroute.len(),
+            target
+                .traceroute
+                .iter()
+                .map(|h| h.ip.clone())
+                .collect::<Vec<_>>()
+                .join(" → ")
+        ));
+    }
+
     // Working domain for domain-based phases
     let working_domain: Option<String> = if target.input_kind == "domain" {
         target.hostname.clone()
@@ -625,6 +717,7 @@ pub async fn run_scan(
                 subdomains: vec![],
                 subdirs: vec![],
                 http: http_infos.clone(),
+                webscan: vec![],
                 snmp: None,
                 ldap: None,
                 netbios: None,
@@ -878,6 +971,51 @@ pub async fn run_scan(
     }
 
     // ------------------------------------------------------------------
+    // Phase 11b: ZAP-style web application scan
+    // ------------------------------------------------------------------
+    if !http_infos.is_empty() {
+        shared.running("ZAP Web Scan");
+        shared.log("running OWASP-ZAP-style passive + active web checks…");
+        let roots: Vec<(String, HttpInfo)> = http_infos
+            .iter()
+            .map(|h| (h.url.trim_end_matches('/').to_string(), h.clone()))
+            .collect();
+        match modules::webscan::scan_all(roots, Duration::from_secs(8)).await {
+            Ok(scans) => {
+                let mut hi = 0usize;
+                let mut med = 0usize;
+                for sc in &scans {
+                    for a in &sc.alerts {
+                        let sev = match a.risk.as_str() {
+                            "High" => {
+                                hi += 1;
+                                Severity::High
+                            }
+                            "Medium" => {
+                                med += 1;
+                                Severity::Medium
+                            }
+                            "Low" => Severity::Low,
+                            _ => Severity::Info,
+                        };
+                        shared.finding(
+                            sev,
+                            "zap",
+                            &format!("[{}] {} — {}", a.risk, a.plugin, a.url),
+                        );
+                        g.relate("url", &sc.url, "zap-alert", "zap", &a.plugin);
+                    }
+                }
+                webscan_results = scans;
+                shared.done("ZAP Web Scan", &format!("{} alerts ({} high / {} medium)", webscan_results.iter().map(|s| s.alerts.len()).sum::<usize>(), hi, med));
+            }
+            Err(e) => shared.failed("ZAP Web Scan", &format!("{}", e)),
+        }
+    } else {
+        shared.skipped("ZAP Web Scan", "no web service");
+    }
+
+    // ------------------------------------------------------------------
     // Phase 12: SNMP
     // ------------------------------------------------------------------
     let mut snmp_res: Option<SnmpResults> = None;
@@ -1096,7 +1234,7 @@ pub async fn run_scan(
         let mut rescan_pending: Option<String> = None;
         'followup: loop {
             rounds += 1;
-            let inter = assemble_results(&cve_refs, &results_cves, &started, &shared, nv.as_ref().map(|c| c.model.clone()), &target,
+            let inter = assemble_results(&cve_refs, &results_cves, &webscan_results, &started, &shared, nv.as_ref().map(|c| c.model.clone()), &target,
                 &port_results, &vulns, &dns_results, &subdomains, &subdirs, &http_infos,
                 &snmp_res, &ldap_res, &netbios_res, &smb_res, &whois_res, &dorks, g.data(),
                 ai_plan.clone(), final_decisions.clone(), pivots.clone());
@@ -1245,7 +1383,7 @@ pub async fn run_scan(
                     }
                     FollowUpAction::PivotDomains { domains } => {
                         let candidates = pivot_candidates(
-                            &assemble_results(&cve_refs, &results_cves, &started, &shared, nv.as_ref().map(|c| c.model.clone()), &target,
+                            &assemble_results(&cve_refs, &results_cves, &webscan_results, &started, &shared, nv.as_ref().map(|c| c.model.clone()), &target,
                                 &port_results, &vulns, &dns_results, &subdomains, &subdirs, &http_infos,
                                 &snmp_res, &ldap_res, &netbios_res, &smb_res, &whois_res, &dorks, g.data(),
                                 ai_plan.clone(), final_decisions.clone(), pivots.clone()),
@@ -1381,7 +1519,7 @@ pub async fn run_scan(
         &format!("{} nodes / {} edges", graph.nodes.len(), graph.edges.len()),
     );
 
-    let mut results = assemble_results(&cve_refs, &results_cves, &started, &shared, nv.as_ref().map(|c| c.model.clone()), &target,
+    let mut results = assemble_results(&cve_refs, &results_cves, &webscan_results, &started, &shared, nv.as_ref().map(|c| c.model.clone()), &target,
         &port_results, &vulns, &dns_results, &subdomains, &subdirs, &http_infos,
         &snmp_res, &ldap_res, &netbios_res, &smb_res, &whois_res, &dorks, graph.clone(),
         ai_plan.clone(), final_decisions, pivots);
@@ -1426,6 +1564,7 @@ pub async fn run_scan(
             shared.with(|s| {
                 s.report_path = Some(path.display().to_string());
             });
+            crate::gui::set_report_path(path.display().to_string());
             shared.done("Final Report", &format!("saved to {}", path.display()));
         }
         Err(e) => {
@@ -1515,7 +1654,7 @@ pub fn is_ip_literal(s: &str) -> bool {
     s.parse::<std::net::Ipv6Addr>().is_ok()
 }
 
-fn assemble_results(cve_refs: &[DorkResult], cves: &[CveEntry],
+fn assemble_results(cve_refs: &[DorkResult], cves: &[CveEntry], webscan: &[WebScanResult],
     started: &Instant,
     shared: &SharedState,
     ai_model: Option<String>,
@@ -1539,6 +1678,7 @@ fn assemble_results(cve_refs: &[DorkResult], cves: &[CveEntry],
 ) -> ReconResults {
     let cve_refs = cve_refs.to_vec();
     let cves = cves.to_vec();
+    let webscan = webscan.to_vec();
     let duration = started.elapsed().as_secs();
     ReconResults {
         meta: Meta {
@@ -1556,6 +1696,7 @@ fn assemble_results(cve_refs: &[DorkResult], cves: &[CveEntry],
         subdomains: subdomains.to_vec(),
         subdirs: subdirs.to_vec(),
         http: http_infos.to_vec(),
+        webscan: webscan.to_vec(),
         snmp: snmp.clone(),
         ldap: ldap.clone(),
         netbios: netbios.clone(),
@@ -1588,5 +1729,19 @@ fn assemble_results(cve_refs: &[DorkResult], cves: &[CveEntry],
                 })
                 .collect()
         }),
+    }
+}
+
+pub async fn send_probe() -> Result<()> { Ok(()) }
+
+#[cfg(test)]
+mod send_tests {
+    #[test]
+    fn run_scan_future_is_send() {
+        fn assert_send<T: Send>(_: T) {}
+        let opts = super::Opts::default();
+        let cfg = crate::config::Config::default();
+        let shared = crate::state::SharedState::new("t".into());
+        assert_send(super::run_scan("t", &opts, &cfg, shared, None));
     }
 }
