@@ -18,6 +18,17 @@ pub struct Selected {
     pub note: String,
 }
 
+/// Pull ONLY the final content (never the reasoning/thinking) — used for
+/// the written report where chain-of-thought must not leak.
+pub fn message_content_only(msg: &Value) -> Option<String> {
+    let content = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
+    if content.trim().is_empty() {
+        None
+    } else {
+        Some(content.to_string())
+    }
+}
+
 /// Pull the assistant text out of an OpenAI/NIM completion message.
 /// Modern reasoning models (GLM, GPT-OSS, Nemotron reasoning variants) put
 /// their thinking into `reasoning_content` and may leave `content` null —
@@ -227,10 +238,12 @@ impl NvClient {
             let status = resp.status();
             if status.is_success() {
                 let v: Value = resp.json().await.context("bad chat JSON")?;
-                let content = v
+                let msg = v
                     .pointer("/choices/0/message")
-                    .and_then(message_text)
                     .ok_or_else(|| anyhow!("no content in response: {}", truncate_value(&v)))?;
+                let content = message_content_only(msg)
+                    .or_else(|| message_text(msg))
+                    .ok_or_else(|| anyhow!("empty content: {}", truncate_value(&v)))?;
                 return Ok(content);
             }
 
@@ -306,12 +319,15 @@ fn candidates(models: &[String], preferred: Option<String>) -> Vec<String> {
         let l = id.to_ascii_lowercase();
         let mut s = 0i32;
         // fast + capable agent defaults first (2026 NVIDIA lineup)
+        // nemotron-3.5-lightning-30b-a3b is the default fast reasoning model
+        if l.contains("nemotron-3.5") && l.contains("lightning") { s += 150; }
+        else if l.contains("nemotron-3") && l.contains("lightning") { s += 140; }
+        else if l.contains("nemotron") && (l.contains("super") || l.contains("lightning")) { s += 100; }
+        else if l.contains("nemotron") && l.contains("instruct") { s += 75; }
         if l.contains("glm") && l.contains("flash") { s += 130; }
         else if l.contains("glm") { s += 120; }
         if l.contains("gemma-4") { s += 105; }
         else if l.contains("gemma-3") { s += 95; }
-        if l.contains("nemotron") && (l.contains("super") || l.contains("lightning")) { s += 100; }
-        else if l.contains("nemotron") && l.contains("instruct") { s += 75; }
         if l.contains("kimi") { s += 80; }
         if l.contains("gpt-oss") { s += 78; }
         if l.contains("qwen") { s += 70; }

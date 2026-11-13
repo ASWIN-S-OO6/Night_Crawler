@@ -109,6 +109,11 @@ pub async fn map_cves(
                 severity: "INFO".into(),
                 score: 0.0,
                 url: String::new(),
+                cvss_vector: None,
+                exploit_available: false,
+                exploit_sources: Vec::new(),
+                published_date: None,
+                modified_date: None,
             });
         }
     }
@@ -240,6 +245,11 @@ fn cve_to_entry(cve: &serde_json::Value) -> Option<CveEntry> {
         severity,
         score,
         url,
+        cvss_vector: None,
+        exploit_available: false,
+        exploit_sources: Vec::new(),
+        published_date: None,
+        modified_date: None,
     })
 }
 
@@ -386,6 +396,11 @@ pub async fn circl_search(
             severity: "UNKNOWN".into(),
             score: 0.0,
             url: format!("https://nvd.nist.gov/vuln/detail/{}", id),
+            cvss_vector: None,
+            exploit_available: false,
+            exploit_sources: Vec::new(),
+            published_date: None,
+            modified_date: None,
         });
     }
     Ok(out)

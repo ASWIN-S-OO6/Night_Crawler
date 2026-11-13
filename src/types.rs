@@ -67,6 +67,10 @@ pub struct GeoInfo {
     pub isp: Option<String>,
     pub org: Option<String>,
     pub asn: Option<String>,
+    pub lat: Option<f64>,
+    pub lon: Option<f64>,
+    pub timezone: Option<String>,
+    pub zip: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -142,6 +146,10 @@ pub struct VulnFinding {
     pub evidence: String,
     pub description: String,
     pub reference: Option<String>,
+    pub exploit_available: Option<bool>,
+    pub exploit_sources: Vec<String>,
+    pub remediation_priority: Option<u8>, // 1-10
+    pub next_steps: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -231,6 +239,10 @@ pub struct WhoisResults {
     pub org: Option<String>,
     pub abuse_email: Option<String>,
     pub raw: String,
+    pub registrant_name: Option<String>,
+    pub registrant_email: Option<String>,
+    pub name_servers: Vec<String>,
+    pub dnssec: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -277,6 +289,11 @@ pub struct CveEntry {
     pub severity: String,
     pub score: f64,
     pub url: String,
+    pub cvss_vector: Option<String>,
+    pub exploit_available: bool,
+    pub exploit_sources: Vec<String>,
+    pub published_date: Option<String>,
+    pub modified_date: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -320,4 +337,41 @@ pub struct ReconResults {
     pub cves: Vec<CveEntry>,
     pub module_log: Vec<String>,
     pub phases: Vec<(String, String)>,
+    pub api_endpoints: Vec<crate::modules::api_discovery::ApiEndpoint>,
+    pub attack_paths: Vec<AttackPath>,
+    pub exploitation_recommendations: Vec<ExploitationRecommendation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttackPath {
+    pub name: String,
+    pub description: String,
+    pub steps: Vec<AttackStep>,
+    pub severity: Severity,
+    pub confidence: String,
+    pub prerequisites: Vec<String>,
+    pub impact: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttackStep {
+    pub order: usize,
+    pub title: String,
+    pub description: String,
+    pub tool: Option<String>,
+    pub command: Option<String>,
+    pub expected_result: String,
+    pub evidence: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExploitationRecommendation {
+    pub priority: u8,
+    pub title: String,
+    pub description: String,
+    pub tool: String,
+    pub command: String,
+    pub validates: String,
+    pub evidence: Vec<String>,
+    pub risk: String,
 }

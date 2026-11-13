@@ -15,3 +15,7 @@ pub mod vulns;
 pub mod whois;
 pub mod webscan;
 pub mod hostinfo;
+pub mod nmap;
+pub mod geo;
+pub mod api_discovery;
+pub mod recursive_agent;

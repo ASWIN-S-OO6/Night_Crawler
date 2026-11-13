@@ -3,6 +3,7 @@ use crate::ai::NvClient;
 use crate::config::{parse_ports, Config, ScanCfg};
 use crate::graph::GraphBuilder;
 use crate::modules;
+use crate::modules::api_discovery::ApiDiscoveryResult;
 use crate::state::{PhaseStatus, SharedState};
 use crate::types::*;
 use crate::util::strip_domain;
@@ -338,7 +339,44 @@ async fn run_scan_inner(
     }
 
     // ------------------------------------------------------------------
-    // Phase 3: NightCrawler Port Strategy (the model chooses)
+    // Phase 3: Geo IP Location & Mapping (NEW)
+    // ------------------------------------------------------------------
+    shared.running("Geo IP Location & Mapping");
+    match modules::geo::geo_lookup(ip).await {
+        Ok(geo) => {
+            target.geo = Some(geo.clone());
+            shared.set_geo(geo.clone());
+            shared.log(format!(
+                "geo: {} · {} · isp {} · asn {}",
+                geo.city.clone().unwrap_or_default(),
+                geo.country.clone().unwrap_or_default(),
+                geo.isp.clone().unwrap_or_default(),
+                geo.asn.clone().unwrap_or_default()
+            ));
+            shared.finding(
+                Severity::Info,
+                "host",
+                &format!(
+                    "host located: {} · {} · {} ({})",
+                    geo.city.clone().unwrap_or_default(),
+                    geo.country.clone().unwrap_or_default(),
+                    geo.org.clone().unwrap_or_default(),
+                    geo.asn.clone().unwrap_or_default()
+                ),
+            );
+            shared.done("Geo IP Location & Mapping", &format!("{} · {}", geo.city.unwrap_or_default(), geo.country.unwrap_or_default()));
+        }
+        Err(e) => {
+            shared.log(format!("geo lookup failed: {}", e));
+            shared.skipped("Geo IP Location & Mapping", "all providers failed");
+        }
+    }
+
+    // full host enrichment (OS, traceroute) — now that geo is done
+    let _ = modules::hostinfo::enrich_target(&mut target, &[], modules::ping::last_ttl()).await;
+
+    // ------------------------------------------------------------------
+    // Phase 4: NightCrawler Port Strategy (the model chooses)
     // ------------------------------------------------------------------
     let mut ports_spec = opts.ports_spec.clone();
     match (&nv, opts.enable_ai, &ports_spec) {
@@ -417,20 +455,83 @@ async fn run_scan_inner(
             shared.clear_progress();
         });
     }
-    let open_ports = modules::portscan::scan_tcp(
-        ip,
-        &ports,
-        scan_cfg.max_concurrency,
-        scan_cfg.timeout_ms,
-        Some(progress.clone()),
-    )
-    .await?;
+    // ------------------------------------------------------------------
+    // nmap-first port scan with NSE scripts (falls back to built-in)
+    // ------------------------------------------------------------------
+    let mut nmap_used = false;
+    let open_ports: Vec<u16>;
+    let mut port_results: Vec<PortResult> = Vec::new();
+    if modules::nmap::nmap_available() {
+        let spec = match ports.len() {
+            0..=500 => "top500".to_string(), // let nmap pick its own top set
+            n if n >= 60000 => "1-65535".to_string(),
+            _ => ports
+                .iter()
+                .map(|p| p.to_string())
+                .collect::<Vec<_>>()
+                .join(","),
+        };
+        shared.log(format!("nmap available: running nmap -sV -O with NSE scripts (ports: {})…", spec));
+        match modules::nmap::nmap_scan(ip, &host_header, &spec, 4).await {
+            Ok(results) => {
+                open_ports = results.iter().filter(|p| p.open).map(|p| p.port).collect();
+                nmap_used = true;
+                // nmap already did version detection — use its results directly
+                let _ = &results;
+                port_results = results;
+                for pr in &port_results {
+                    shared.finding(
+                        Severity::Info,
+                        "port",
+                        &format!("{}/{} {} — {} {} [nmap+NSE]", pr.port, pr.proto, pr.service,
+                            pr.product.clone().unwrap_or_default(),
+                            pr.version.clone().unwrap_or_default()),
+                    );
+                    g.relate("ip", &ip.to_string(), "exposes",
+                        "service", &format!("{}:{}", pr.port, pr.service));
+                }
+            }
+            Err(e) => {
+                shared.log(format!("nmap failed ({}), falling back to built-in scanner", e));
+                open_ports = modules::portscan::scan_tcp(
+                    ip,
+                    &ports,
+                    scan_cfg.max_concurrency,
+                    scan_cfg.timeout_ms,
+                    Some(progress.clone()),
+                )
+                .await?;
+            }
+        }
+    } else {
+        open_ports = modules::portscan::scan_tcp(
+            ip,
+            &ports,
+            scan_cfg.max_concurrency,
+            scan_cfg.timeout_ms,
+            Some(progress.clone()),
+        )
+        .await?;
+    }
     shared.clear_progress();
     shared.stat("open_ports", open_ports.len() as u64);
     shared.done(
         "Port Scan",
-        &format!("{} open / {} scanned", open_ports.len(), ports.len()),
+        &format!("{} open / {} scanned{}", open_ports.len(), ports.len(),
+            if nmap_used { " [nmap+NSE]" } else { "" }),
     );
+    if !nmap_used {
+        shared.log(format!("open ports: {:?}", open_ports));
+        for p in &open_ports {
+            shared.finding(
+                Severity::Info,
+                "port",
+                &format!("{}/tcp open — {}", p, crate::config::service_for_port(*p)),
+            );
+            g.relate("ip", &ip.to_string(), "exposes",
+                "service", &format!("{}:{}", p, crate::config::service_for_port(*p)));
+        }
+    }
     shared.log(format!("open ports: {:?}", open_ports));
     for p in &open_ports {
         shared.finding(
@@ -450,8 +551,11 @@ async fn run_scan_inner(
     // ------------------------------------------------------------------
     // Phase 5: Service & version detection
     // ------------------------------------------------------------------
+    if nmap_used {
+        shared.done("Service & Version Detection", "nmap -sV + NSE (accurate)");
+    } else {
     shared.running("Service & Version Detection");
-    let mut port_results = modules::banner::detect_services(
+    port_results = modules::banner::detect_services(
         ip,
         &host_header,
         &open_ports,
@@ -481,6 +585,7 @@ async fn run_scan_inner(
         "Service & Version Detection",
         &format!("{} services fingerprinted", port_results.len()),
     );
+    } // end !nmap_used
 
     // HTTP probing for web ports (rich HttpInfo)
     let mut http_infos: Vec<HttpInfo> = Vec::new();
@@ -734,6 +839,9 @@ async fn run_scan_inner(
                 cves: vec![],
                 module_log: vec![],
                 phases: vec![],
+                api_endpoints: vec![],
+                attack_paths: vec![],
+                exploitation_recommendations: vec![],
             });
             let decision =
                 tokio::time::timeout(Duration::from_secs(300), agent::plan_modules(client, &snap)).await;
@@ -1016,7 +1124,49 @@ async fn run_scan_inner(
     }
 
     // ------------------------------------------------------------------
-    // Phase 12: SNMP
+    // Phase 13 (NEW): API Endpoint Discovery
+    // ------------------------------------------------------------------
+    let mut api_discovery_results: Option<ApiDiscoveryResult> = None;
+    if has_web {
+        shared.running("API Endpoint Discovery");
+        shared.log("discovering API endpoints (OpenAPI, GraphQL, WebSocket, REST)...");
+        match modules::api_discovery::discover_apis(
+            &web_bases,
+            &port_results,
+            &http_infos,
+            Duration::from_secs(scan_cfg.http_timeout_ms),
+        ).await {
+            Ok(api_result) => {
+                shared.log(format!(
+                    "API discovery: {} endpoints, {} specs, {} GraphQL, {} WebSocket",
+                    api_result.endpoints.len(),
+                    api_result.spec_urls.len(),
+                    api_result.graphql_endpoints.len(),
+                    api_result.websocket_endpoints.len()
+                ));
+                for ep in &api_result.endpoints {
+                    let sev = if ep.auth_required { Severity::Medium } else { Severity::Info };
+                    shared.finding(
+                        sev,
+                        "api",
+                        &format!("{} {} [{:?}]", ep.method, ep.path, ep.api_type),
+                    );
+                    g.relate("url", &ep.url, "api-endpoint", "api", &ep.method);
+                }
+                shared.done("API Endpoint Discovery", &format!("{} endpoints found", api_result.endpoints.len()));
+                api_discovery_results = Some(api_result);
+            }
+            Err(e) => {
+                shared.log(format!("API discovery failed: {}", e));
+                shared.skipped("API Endpoint Discovery", "error during discovery");
+            }
+        }
+    } else {
+        shared.skipped("API Endpoint Discovery", "no web service");
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 14: SNMP
     // ------------------------------------------------------------------
     let mut snmp_res: Option<SnmpResults> = None;
     if want("snmp") {
@@ -1237,7 +1387,8 @@ async fn run_scan_inner(
             let inter = assemble_results(&cve_refs, &results_cves, &webscan_results, &started, &shared, nv.as_ref().map(|c| c.model.clone()), &target,
                 &port_results, &vulns, &dns_results, &subdomains, &subdirs, &http_infos,
                 &snmp_res, &ldap_res, &netbios_res, &smb_res, &whois_res, &dorks, g.data(),
-                ai_plan.clone(), final_decisions.clone(), pivots.clone());
+                ai_plan.clone(), final_decisions.clone(), pivots.clone(),
+                &[], &[], &[]);
             let mut snap = evidence_snapshot(&inter);
             if let Some(obj) = snap.as_object_mut() {
                 obj.insert(
@@ -1386,7 +1537,8 @@ async fn run_scan_inner(
                             &assemble_results(&cve_refs, &results_cves, &webscan_results, &started, &shared, nv.as_ref().map(|c| c.model.clone()), &target,
                                 &port_results, &vulns, &dns_results, &subdomains, &subdirs, &http_infos,
                                 &snmp_res, &ldap_res, &netbios_res, &smb_res, &whois_res, &dorks, g.data(),
-                                ai_plan.clone(), final_decisions.clone(), pivots.clone()),
+                                ai_plan.clone(), final_decisions.clone(), pivots.clone(),
+                                &[], &[], &[]),
                             &working_domain,
                         );
                         let valid: Vec<String> = domains
@@ -1519,14 +1671,65 @@ async fn run_scan_inner(
         &format!("{} nodes / {} edges", graph.nodes.len(), graph.edges.len()),
     );
 
+    // ------------------------------------------------------------------
+    // Phase 20 (NEW): Attack Path Generation
+    // ------------------------------------------------------------------
+    let mut attack_paths: Vec<AttackPath> = Vec::new();
+    let mut exploitation_recommendations: Vec<ExploitationRecommendation> = Vec::new();
+    if nv.is_some() && opts.enable_ai {
+        shared.running("Attack Path Generation");
+        shared.thinking(true);
+        let attack_snap = serde_json::json!({
+            "target": target.input,
+            "open_ports": port_results.iter().map(|p| serde_json::json!({
+                "port": p.port, "service": p.service, "product": p.product, "version": p.version
+            })).collect::<Vec<_>>(),
+            "vulns": vulns.iter().map(|v| serde_json::json!({
+                "title": v.title, "severity": v.severity, "confidence": v.confidence, 
+                "cve": v.cve, "affected": v.affected, "evidence": v.evidence
+            })).collect::<Vec<_>>(),
+            "api_endpoints": api_discovery_results.as_ref().map(|r| r.endpoints.iter().map(|e| serde_json::json!({
+                "url": e.url, "method": e.method, "path": e.path, "type": e.api_type
+            })).collect::<Vec<_>>()).unwrap_or_default(),
+            "webscan_alerts": webscan_results.iter().flat_map(|s| s.alerts.iter().map(|a| serde_json::json!({
+                "plugin": a.plugin, "risk": a.risk, "url": a.url
+            }))).collect::<Vec<_>>(),
+            "subdomains": subdomains.iter().map(|s| s.name.clone()).collect::<Vec<_>>(),
+            "geo": target.geo,
+            "cves": results_cves.iter().map(|c| serde_json::json!({
+                "id": c.id, "product": c.product, "score": c.score, "exploit_available": c.exploit_available
+            })).collect::<Vec<_>>(),
+        });
+        if let Some(client) = nv.as_ref() {
+            if let Ok(Ok(paths)) = tokio::time::timeout(Duration::from_secs(300), crate::agent::generate_attack_paths(client, &attack_snap)).await {
+                attack_paths = paths;
+                shared.log(format!("Generated {} attack paths", attack_paths.len()));
+                for path in &attack_paths {
+                    shared.finding(
+                        path.severity,
+                        "attack-path",
+                        &format!("{} — {}", path.name, path.description),
+                    );
+                }
+            }
+        }
+        shared.thinking(false);
+        shared.done("Attack Path Generation", &format!("{} paths", attack_paths.len()));
+    } else {
+        shared.skipped("Attack Path Generation", "no model / agent offline");
+    }
+
     let mut results = assemble_results(&cve_refs, &results_cves, &webscan_results, &started, &shared, nv.as_ref().map(|c| c.model.clone()), &target,
         &port_results, &vulns, &dns_results, &subdomains, &subdirs, &http_infos,
         &snmp_res, &ldap_res, &netbios_res, &smb_res, &whois_res, &dorks, graph.clone(),
-        ai_plan.clone(), final_decisions, pivots);
+        ai_plan.clone(), final_decisions, pivots,
+        &api_discovery_results.as_ref().map(|r| r.endpoints.clone()).unwrap_or_default(), &attack_paths, &exploitation_recommendations);
     results.graph = graph;
+    results.attack_paths = attack_paths;
+    results.exploitation_recommendations = exploitation_recommendations;
 
     // ------------------------------------------------------------------
-    // Phase 20: NightCrawler analysis & report (doctrine §9 format)
+    // Phase 21: NightCrawler analysis & report (doctrine §9 format)
     // ------------------------------------------------------------------
     match nv.as_ref() {
         Some(client) if opts.enable_ai => {
@@ -1654,7 +1857,10 @@ pub fn is_ip_literal(s: &str) -> bool {
     s.parse::<std::net::Ipv6Addr>().is_ok()
 }
 
-fn assemble_results(cve_refs: &[DorkResult], cves: &[CveEntry], webscan: &[WebScanResult],
+fn assemble_results(
+    cve_refs: &[DorkResult],
+    cves: &[CveEntry],
+    webscan: &[WebScanResult],
     started: &Instant,
     shared: &SharedState,
     ai_model: Option<String>,
@@ -1675,6 +1881,9 @@ fn assemble_results(cve_refs: &[DorkResult], cves: &[CveEntry], webscan: &[WebSc
     ai_plan: Option<AiPlan>,
     ai_decisions: Vec<AiDecision>,
     pivots: Vec<PivotData>,
+    api_endpoints: &[crate::modules::api_discovery::ApiEndpoint],
+    attack_paths: &[AttackPath],
+    exploitation_recommendations: &[ExploitationRecommendation],
 ) -> ReconResults {
     let cve_refs = cve_refs.to_vec();
     let cves = cves.to_vec();
@@ -1729,6 +1938,9 @@ fn assemble_results(cve_refs: &[DorkResult], cves: &[CveEntry], webscan: &[WebSc
                 })
                 .collect()
         }),
+        api_endpoints: api_endpoints.to_vec(),
+        attack_paths: attack_paths.to_vec(),
+        exploitation_recommendations: exploitation_recommendations.to_vec(),
     }
 }
 

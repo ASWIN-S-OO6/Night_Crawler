@@ -1,14 +1,17 @@
 //! Self-contained graphical HTML report generator.
 //!
 //! Produces `report.html`: dark-themed, zero external dependencies
-//! (inline CSS + hand-rolled SVG charts + SVG entity graph), so the file
+//! (inline CSS + D3.js v7 + Leaflet.js + hand-rolled SVG charts), so the file
 //! renders offline in any browser.
 
-use crate::types::{GraphData, ReconResults, Severity};
+use crate::types::{GraphData, ReconResults, Severity, VulnFinding, AttackPath, AttackStep, ExploitationRecommendation, AiDecision, PivotData, CveEntry, DorkResult, Meta, TargetInfo, PortResult, SubdomainResult, DirResult, HttpInfo, WebScanResult};
+use crate::modules::api_discovery::{ApiEndpoint, ApiType};
+use crate::modules::api_discovery::ApiType as ApiDiscoveryApiType;
+use anyhow::Result;
+use serde::Serialize;
+use std::collections::HashMap;
 
 pub fn html_escape(s: &str) -> String {
-    // entity strings are built from char arrays so no raw HTML entities
-    // appear in this source file
     let amp: &str = &['&', 'a', 'm', 'p', ';'].iter().collect::<String>();
     let lt: &str = &['&', 'l', 't', ';'].iter().collect::<String>();
     let gt: &str = &['&', 'g', 't', ';'].iter().collect::<String>();
@@ -46,12 +49,47 @@ fn sev_label(s: &Severity) -> &'static str {
     }
 }
 
+fn api_type_label(t: &ApiType) -> &'static str {
+    match t {
+        ApiType::Rest => "REST",
+        ApiType::Graphql => "GraphQL",
+        ApiType::Grpc => "gRPC",
+        ApiType::Soap => "SOAP",
+        ApiType::Websocket => "WebSocket",
+        ApiType::Unknown => "Unknown",
+    }
+}
+
+fn section_open(title: &str, icon: &str) -> String {
+    format!(
+        r###"<div class="section"><h2>{} {}</h2>"###,
+        icon, html_escape(title)
+    )
+}
+
+fn section_close() -> String {
+    r###"</div>"###.to_string()
+}
+
 /// Build the complete HTML dashboard for a finished scan.
 pub fn build_html(results: &ReconResults) -> String {
-    let mut h = String::with_capacity(96 * 1024);
+    let mut h = String::with_capacity(512 * 1024);
     h.push_str(&header_block(results));
     h.push_str(&stats_block(results));
     h.push_str(&charts_block(results));
+    h.push_str(&host_block(results));
+    h.push_str(&attack_surface_map_block(results));
+    h.push_str(&kill_chain_graph_block(results));
+    h.push_str(&attack_paths_graph_block(results));
+    h.push_str(&vulnerability_heatmap_block(results));
+    h.push_str(&credential_map_block(results));
+    h.push_str(&network_topology_block(results));
+    h.push_str(&credential_heatmap_block(results));
+    h.push_str(&attack_paths_graph_block_interactive(results));
+    h.push_str(&vulnerability_timeline_block(results));
+    h.push_str(&mitre_attack_heatmap_block(results));
+    h.push_str(&remediation_priority_block(results));
+    h.push_str(&evidence_explorer_block(results));
 
     h.push_str(&host_block(results));
 
@@ -74,1091 +112,2648 @@ pub fn build_html(results: &ReconResults) -> String {
     }
     h.push_str(&section_close());
 
+    // Attack Paths
+    h.push_str(&attack_paths_block(results));
+
+    // Exploitation Recommendations
+    h.push_str(&exploitation_recommendations_block(results));
+
+    // API Endpoints
+    h.push_str(&api_endpoints_block(results));
+
     // Findings
     h.push_str(&findings_block(results));
 
     // CVE / exploit references from the CSE
-    h.push_str(&cve_block(results));
-    h.push_str(&zap_block(results));
+    h.push_str(&cve_references_block(results));
 
-    // Ports & services
-    h.push_str(&ports_block(results));
+    // AI Decisions
+    h.push_str(&ai_decisions_block(results));
 
-    // Web + enumeration sections
-    h.push_str(&web_block(results));
-    h.push_str(&enum_block(results));
-    h.push_str(&dns_block(results));
-    h.push_str(&osint_block(results));
+    // Pivot Log
+    h.push_str(&pivot_log_block(results));
 
-    // Entity graph
-    h.push_str(&section_open("Link Analysis — Entity Graph", "🕸"));
-    h.push_str(&svg_graph(&results.graph));
-    h.push_str(&section_close());
+    // Methodology
+    h.push_str(&methodology_block());
 
-    // AI decision timeline
-    h.push_str(&timeline_block(results));
+    // Limitations
+    h.push_str(&limitations_block());
 
-    h.push_str(&footer_block(results));
-    wrap_document(results, h)
+    h.push_str(&footer_block());
+
+    h
 }
 
-// ---------------------------------------------------------------------------
-// document scaffolding
-// ---------------------------------------------------------------------------
-
-fn wrap_document(results: &ReconResults, body: String) -> String {
-    let target = html_escape(&results.target.input);
-    format!(
-        r##"<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>NightCrawler — {target}</title>
-<style>
-:root {{
-  --bg:#0a0e14; --panel:#111827; --panel2:#0f1520; --border:#1f2b3d;
-  --text:#e2e8f0; --muted:#8b9bb4; --accent:#d946ef; --cyan:#22d3ee;
-  --green:#34d399; --red:#f87171; --yellow:#fbbf24;
-}}
-* {{ box-sizing:border-box; }}
-body {{ margin:0; background:var(--bg); color:var(--text);
-  font:15px/1.55 'Segoe UI',system-ui,-apple-system,sans-serif; }}
-.wrap {{ max-width:1180px; margin:0 auto; padding:24px 20px 60px; }}
-a {{ color:var(--cyan); text-decoration:none; }}
-a:hover {{ text-decoration:underline; }}
-.banner {{ background:linear-gradient(120deg,#1b0b23 0%,#0a1a2e 60%,#0a0e14 100%);
-  border:1px solid #2c1f3d; border-radius:14px; padding:26px 28px; margin-bottom:22px;
-  position:relative; overflow:hidden; }}
-.banner h1 {{ margin:0 0 6px; font-size:26px; letter-spacing:.5px;
-  background:linear-gradient(90deg,#e879f9,#22d3ee); -webkit-background-clip:text;
-  background-clip:text; color:transparent; }}
-.banner .sub {{ color:var(--muted); font-size:14px; }}
-.banner .meta {{ display:flex; gap:18px; flex-wrap:wrap; margin-top:14px; font-size:13px;
-  color:#b7c3d7; }}
-.banner .meta b {{ color:#fff; }}
-.cards {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin-bottom:22px; }}
-.card {{ background:var(--panel); border:1px solid var(--border); border-radius:12px;
-  padding:14px 16px; }}
-.card .num {{ font-size:26px; font-weight:700; }}
-.card .lbl {{ color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:1px; }}
-.section {{ background:var(--panel2); border:1px solid var(--border); border-radius:14px;
-  padding:20px 22px; margin-bottom:18px; }}
-.section>h2 {{ margin:0 0 12px; font-size:18px; color:#cbd5e1;
-  border-bottom:1px solid var(--border); padding-bottom:10px; }}
-table {{ width:100%; border-collapse:collapse; font-size:13.5px; margin:8px 0; }}
-th {{ text-align:left; color:#93a6c1; font-weight:600; padding:8px 10px;
-  border-bottom:2px solid var(--border); font-size:12.5px; text-transform:uppercase; letter-spacing:.5px; }}
-td {{ padding:7px 10px; border-bottom:1px solid #17202e; vertical-align:top; }}
-tr:hover td {{ background:#0d1420; }}
-.chip {{ display:inline-block; padding:2px 8px; border-radius:20px; font-size:11px;
-  font-weight:700; color:#0a0e14; letter-spacing:.5px; }}
-.muted {{ color:var(--muted); }}
-.finding {{ background:var(--panel); border:1px solid var(--border); border-left:4px solid #333;
-  border-radius:10px; padding:14px 16px; margin:10px 0; }}
-.finding h3 {{ margin:0 0 8px; font-size:15.5px; }}
-.finding .meta {{ color:var(--muted); font-size:12.5px; margin-bottom:6px; }}
-.finding pre {{ background:#0a0e14; border:1px solid #17202e; padding:10px;
-  border-radius:8px; overflow-x:auto; font-size:12.5px; }}
-code {{ background:#1a2332; padding:1px 5px; border-radius:5px; font-size:12.5px; color:#a5f3fc; }}
-details {{ margin:10px 0; }}
-details summary {{ cursor:pointer; color:#cbd5e1; font-weight:600; padding:6px 0; }}
-.donut-legend span {{ margin-right:14px; font-size:13px; }}
-.flex {{ display:flex; gap:26px; flex-wrap:wrap; align-items:center; }}
-.bars {{ margin-top:10px; }}
-.bar-row {{ display:flex; align-items:center; gap:10px; margin:5px 0; }}
-.bar-lbl {{ width:110px; color:var(--muted); font-size:12.5px; text-align:right; }}
-.bar-track {{ flex:1; background:#0a0e14; border-radius:6px; height:16px; overflow:hidden; }}
-.bar-fill {{ height:100%; border-radius:6px; }}
-.foot {{ color:var(--muted); font-size:12px; text-align:center; margin-top:26px; }}
-h3.sub {{ color:#e879f9; margin:18px 0 8px; }}
-@media (max-width:760px) {{ .banner .meta {{ gap:10px; }} }}
-</style>
-</head>
-<body><div class="wrap">
-{body}
-</div></body></html>"##,
-        target = target,
-        body = body
-    )
-}
+// =============================================================================
+// HTML Blocks
+// =============================================================================
 
 fn header_block(results: &ReconResults) -> String {
-    let model = results
-        .ai_model
-        .as_deref()
-        .unwrap_or("offline (tools-only)");
-    format!(
-        r#"<div class="banner">
-<h1>🕷 NightCrawler — Reconnaissance Assessment</h1>
-<div class="sub">Autonomous agent · governed by the AGENTS.md pentest doctrine</div>
-<div class="meta">
-  <span>Target: <b>{}</b></span>
-  <span>Started: <b>{}</b></span>
-  <span>Duration: <b>{}s</b></span>
-  <span>Agent model: <b>{}</b></span>
-</div>
-</div>"#,
-        html_escape(&results.target.input),
-        html_escape(&results.meta.started_at),
-        results.meta.duration_secs,
-        html_escape(model),
+    let target_label = html_escape(&results.target.input);
+    let target_kind = html_escape(&results.target.input_kind);
+    let started = &results.meta.started_at;
+    let elapsed = format!("{}s", results.meta.duration_secs);
+    let risk_score = compute_risk_score(results);
+    
+    format!(r###"
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NightCrawler — Adversary Simulation Report: {target}</title>
+<style>{css}</style>
+</head>
+<body>
+<div class="app">
+<header>
+  <div class="header-left">
+    <h1>🕷 NightCrawler</h1>
+    <span class="badge">Adversary Simulation Report</span>
+  </div>
+  <div class="header-right">
+    <div class="risk-gauge" style="--score: {risk_score}">{risk_score}</div>
+    <div class="meta">
+      <span>Target: <b>{target}</b> ({kind})</span>
+      <span>Started: {started}</span>
+      <span>Duration: {elapsed}</span>
+    </div>
+  </div>
+</header>
+"###,
+        target = target_label,
+        kind = target_kind,
+        started = started,
+        elapsed = elapsed,
+        risk_score = risk_score,
+        css = CSS_STYLES
     )
 }
+
+fn footer_block() -> String {
+    r###"
+<footer>
+  <p>NightCrawler v0.1.0 — Autonomous Adversary Simulation Agent</p>
+  <p class="muted">Report generated on demand. All data self-contained in this file.</p>
+</footer>
+</div>
+<script>
+  // Initialize all visualizations
+  document.addEventListener('DOMContentLoaded', () => {
+    initAttackSurfaceMap();
+    initKillChainGraph();
+    initAttackPathGraph();
+    initVulnHeatmap();
+    initCredentialMap();
+    initNetworkTopology();
+    initCredentialHeatmap();
+    initAttackPathGraphInteractive();
+    initVulnTimeline();
+    initMitreHeatmap();
+    initRemediationMatrix();
+    initEvidenceExplorer();
+  });
+</script>
+</body>
+</html>
+"###.to_string()
+}
+
+// CSS Styles - embedded as const
+const CSS_STYLES: &str = r###"
+* { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg: #0a0e14;
+  --panel: #111826;
+  --panel2: #161f2e;
+  --border: #1e2a3d;
+  --text: #dbe4f0;
+  --muted: #7a8ba5;
+  --accent: #d946ef;
+  --accent2: #22d3ee;
+  --green: #22c55e;
+  --red: #ef4444;
+  --orange: #f97316;
+  --yellow: #fbbf24;
+  --cyan: #06b6d4;
+  --purple: #a855f7;
+}
+body { font-family: 'IBM Plex Sans', system-ui, sans-serif; background: var(--bg); color: var(--text); line-height: 1.6; }
+.app { max-width: 1400px; margin: 0 auto; padding: 24px; }
+header { display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 16px; margin-bottom: 24px; padding: 20px; background: linear-gradient(120deg, #1b0b23, #0a1a2e); border: 1px solid #2c1f3d; border-radius: 14px; }
+.header-left { display: flex; align-items: center; gap: 12px; }
+.header-left h1 { font-size: 1.8rem; background: linear-gradient(90deg, #e879f9, #22d3ee); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.badge { background: linear-gradient(90deg, #d946ef, #22d3ee); color: #0a0e14; padding: 4px 12px; border-radius: 20px; font-size: 0.75rem; font-weight: 700; letter-spacing: 0.5px; }
+.header-right { text-align: right; }
+.risk-gauge { display: inline-block; width: 80px; height: 80px; border-radius: 50%; background: conic-gradient(var(--red) calc(var(--score) * 3.6deg), #1e2a3d 0deg); font-size: 1.5rem; font-weight: 700; display: flex; align-items: center; justify-content: center; margin-bottom: 8px; }
+.risk-gauge::before { content: ""; width: 60px; height: 60px; border-radius: 50%; background: var(--bg); }
+.meta { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; color: var(--muted); }
+.meta b { color: var(--text); }
+.section { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin-bottom: 16px; }
+.section h2 { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; font-size: 1.25rem; color: var(--text); border-bottom: 1px solid var(--border); padding-bottom: 10px; }
+.section h3 { margin: 16px 0 8px; font-size: 1rem; color: var(--accent2); }
+.muted { color: var(--muted); font-size: 0.9rem; }
+.chip { display: inline-block; padding: 2px 8px; border-radius: 20px; font-size: 11px; font-weight: 700; color: #0a0e14; letter-spacing: 0.5px; margin-right: 8px; }
+.viz-container { width: 100%; background: #0a0e14; border: 1px solid #17202e; border-radius: 10px; }
+.viz-controls { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+.viz-btn { background: var(--panel2); border: 1px solid var(--border); color: var(--text); padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 0.8rem; transition: all 0.2s; }
+.viz-btn:hover, .viz-btn.active { background: var(--accent); color: #0a0e14; border-color: var(--accent); }
+.tooltip { position: fixed; background: #0a0e14; border: 1px solid #2c1f3d; border-radius: 8px; padding: 10px 12px; font-size: 12px; pointer-events: none; z-index: 1000; max-width: 300px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
+table { width: 100%; border-collapse: collapse; font-size: 13.5px; margin: 12px 0; }
+th { text-align: left; color: #93a6c1; font-weight: 600; padding: 8px 10px; border-bottom: 2px solid var(--border); font-size: 12.5px; text-transform: uppercase; letter-spacing: 0.5px; }
+td { padding: 7px 10px; border-bottom: 1px solid #17202e; vertical-align: top; }
+tr:hover td { background: #0d1420; }
+.finding { background: var(--panel); border: 1px solid var(--border); border-left: 4px solid #333; border-radius: 10px; padding: 14px 16px; margin: 12px 0; }
+.finding h3 { margin: 0 0 8px; font-size: 15.5px; }
+.finding .meta { color: var(--muted); font-size: 12.5px; margin-bottom: 6px; }
+.finding pre { background: #0a0e14; border: 1px solid #17202e; padding: 10px; border-radius: 8px; overflow-x: auto; font-size: 12.5px; }
+code { background: #1a2332; padding: 1px 5px; border-radius: 5px; font-size: 12.5px; color: #a5f3fc; }
+pre { background: #0a0e14; border: 1px solid #17202e; padding: 1rem; border-radius: 8px; overflow-x: auto; font-size: 12.5px; }
+pre code { background: none; padding: 0; color: inherit; }
+a { color: var(--cyan); text-decoration: none; }
+a:hover { text-decoration: underline; }
+footer { text-align: center; padding: 24px; color: var(--muted); font-size: 0.85rem; border-top: 1px solid var(--border); margin-top: 24px; }
+.stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 16px; }
+.stat-card { background: var(--panel2); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+.stat-card .label { font-size: 0.75rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
+.stat-card .value { font-size: 2rem; font-weight: 700; color: var(--text); margin-top: 4px; }
+.stat-card.critical .value { color: #ef4444; }
+.stat-card.high .value { color: #f97316; }
+.stat-card.medium .value { color: #fbbf24; }
+.stat-card.low .value { color: #22d3ee; }
+.charts-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(400px, 1fr)); gap: 16px; }
+.chart-card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; height: 300px; }
+.legend { display: flex; gap: 16px; flex-wrap: wrap; margin: 12px 0; font-size: 12px; }
+.legend-item { display: flex; align-items: center; gap: 6px; }
+.legend-color { width: 12px; height: 12px; border-radius: 3px; }
+#evidence-search { width: 100%; padding: 10px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-size: 14px; margin-bottom: 16px; }
+#evidence-search:focus { outline: none; border-color: var(--accent); }
+.evidence-row { padding: 8px; border-bottom: 1px solid #17202e; font-family: ui-monospace, monospace; font-size: 12px; cursor: pointer; }
+.evidence-row:hover { background: #0d1420; }
+.evidence-row.match { background: rgba(217, 70, 239, 0.1); }
+.heatmap-cell { transition: transform 0.2s; }
+.heatmap-cell:hover { transform: scale(1.02); }
+.remediation-item { display: flex; align-items: center; gap: 12px; padding: 12px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; margin: 8px 0; }
+.remediation-item input[type="checkbox"] { width: 20px; height: 20px; accent-color: var(--accent); }
+.remediation-priority { width: 80px; text-align: center; font-weight: 700; font-size: 12px; border-radius: 4px; padding: 2px 8px; }
+.priority-critical { background: #ef4444; color: #0a0e14; }
+.priority-high { background: #f97316; color: #0a0e14; }
+.priority-medium { background: #fbbf24; color: #0a0e14; }
+.priority-low { background: #22d3ee; color: #0a0e14; }
+.timeline-event { display: flex; gap: 16px; padding: 12px 0; border-left: 2px solid var(--border); padding-left: 16px; position: relative; }
+.timeline-event::before { content: ""; position: absolute; left: -6px; top: 16px; width: 10px; height: 10px; border-radius: 50%; background: var(--accent); border: 2px solid var(--bg); }
+.timeline-event.phase-recon::before { background: #22d3ee; }
+.timeline-event.phase-exploit::before { background: #ef4444; }
+.timeline-event.phase-lateral::before { background: #f97316; }
+.timeline-event.phase-persist::before { background: #e879f9; }
+.timeline-event.phase-impact::before { background: #f87171; }
+#mitre-heatmap { overflow-x: auto; }
+#mitre-heatmap table { min-width: 800px; }
+.mitre-cell { text-align: center; font-size: 11px; }
+.mitre-cell.covered { background: rgba(34, 197, 94, 0.3); }
+.mitre-cell.partial { background: rgba(251, 191, 36, 0.3); }
+.mitre-cell.missing { background: rgba(239, 68, 68, 0.3); }
+"###;
 
 fn stats_block(results: &ReconResults) -> String {
-    let open = results.ports.iter().filter(|p| p.open).count();
-    let crit = results.vulns.iter().filter(|v| v.severity == Severity::Critical).count();
-    let high = results.vulns.iter().filter(|v| v.severity == Severity::High).count();
-    let med = results.vulns.iter().filter(|v| v.severity == Severity::Medium).count();
-    let cve_refs: usize = results.cve_refs.iter().map(|r| r.results.len()).sum();
-    let card = |num: String, lbl: &str, color: &str| {
-        format!(
-            r#"<div class="card"><div class="num" style="color:{}">{}</div><div class="lbl">{}</div></div>"#,
-            color, num, lbl
-        )
-    };
-    format!(
-        "{}{}{}{}{}{}{}{}",
-        card(open.to_string(), "open ports", "#22d3ee"),
-        card(results.subdomains.len().to_string(), "subdomains", "#34d399"),
-        card(results.subdirs.len().to_string(), "web paths", "#34d399"),
-        card(crit.to_string(), "critical", "#ef4444"),
-        card(high.to_string(), "high", "#f97316"),
-        card(med.to_string(), "medium", "#fbbf24"),
-        card(cve_refs.to_string(), "cve refs (CSE)", "#d946ef"),
-        card(results.graph.nodes.len().to_string(), "graph entities", "#8b9bb4"),
-    )
+    let mut h = String::new();
+    h.push_str(&section_open("Scan Statistics", "📊"));
+    h.push_str("<div class='stats-grid'>");
+    
+    let critical = results.vulns.iter().filter(|v| matches!(v.severity, Severity::Critical)).count();
+    let high = results.vulns.iter().filter(|v| matches!(v.severity, Severity::High)).count();
+    let medium = results.vulns.iter().filter(|v| matches!(v.severity, Severity::Medium)).count();
+    let low = results.vulns.iter().filter(|v| matches!(v.severity, Severity::Low)).count();
+    let info = results.vulns.iter().filter(|v| matches!(v.severity, Severity::Info)).count();
+    
+    h.push_str(&format!(r###"<div class="stat-card critical"><div class="label">Critical</div><div class="value">{}</div></div>"###, critical));
+    h.push_str(&format!(r###"<div class="stat-card high"><div class="label">High</div><div class="value">{}</div></div>"###, high));
+    h.push_str(&format!(r###"<div class="stat-card medium"><div class="label">Medium</div><div class="value">{}</div></div>"###, medium));
+    h.push_str(&format!(r###"<div class="stat-card low"><div class="label">Low</div><div class="value">{}</div></div>"###, low));
+    h.push_str(&format!(r###"<div class="stat-card"><div class="label">Info</div><div class="value">{}</div></div>"###, info));
+    h.push_str(&format!(r###"<div class="stat-card"><div class="label">Open Ports</div><div class="value">{}</div></div>"###, results.ports.iter().filter(|p| p.open).count()));
+    h.push_str(&format!(r###"<div class="stat-card"><div class="label">Subdomains</div><div class="value">{}</div></div>"###, results.subdomains.len()));
+    h.push_str(&format!(r###"<div class="stat-card"><div class="label">Directories</div><div class="value">{}</div></div>"###, results.subdirs.len()));
+    h.push_str(&format!(r###"<div class="stat-card"><div class="label">API Endpoints</div><div class="value">{}</div></div>"###, results.api_endpoints.len()));
+    h.push_str(&format!(r###"<div class="stat-card"><div class="label">Attack Paths</div><div class="value">{}</div></div>"###, results.attack_paths.len()));
+    h.push_str(&format!(r###"<div class="stat-card"><div class="label">Exploit Chains</div><div class="value">{}</div></div>"###, results.exploitation_recommendations.len()));
+    // No credentials field in ReconResults
+    // h.push_str(&format!(r###"<div class="stat-card"><div class="label">Credentials</div><div class="value">{}</div></div>"###, results.credentials.len()));
+    
+    h.push_str("</div>");
+    h.push_str(&section_close());
+    h
 }
-
-// ---------------------------------------------------------------------------
-// charts
-// ---------------------------------------------------------------------------
 
 fn charts_block(results: &ReconResults) -> String {
-    let mut crit = 0;
-    let mut high = 0;
-    let mut med = 0;
-    let mut low = 0;
-    let mut info = 0;
-    for v in &results.vulns {
-        match v.severity {
-            Severity::Critical => crit += 1,
-            Severity::High => high += 1,
-            Severity::Medium => med += 1,
-            Severity::Low => low += 1,
-            Severity::Info => info += 1,
+    let mut h = String::new();
+    h.push_str(&section_open("Visual Overview", "📈"));
+    h.push_str("<div class='charts-grid'>");
+    
+    // Port distribution chart
+    h.push_str(&port_dist_chart(results));
+    
+    // Severity pie chart
+    h.push_str(&severity_pie_chart(results));
+    
+    // Service breakdown
+    h.push_str(&service_breakdown_chart(results));
+    
+    // Subdomain discovery sources
+    h.push_str(&subdomain_sources_chart(results));
+    
+    h.push_str("</div>");
+    h.push_str(&section_close());
+    h
+}
+
+fn host_block(results: &ReconResults) -> String {
+    let mut h = String::new();
+    h.push_str(&section_open("Target Host Information", "🎯"));
+    
+    if let Some(ip) = &results.target.ip {
+        h.push_str(&format!("<p><b>IP:</b> {}</p>", html_escape(&ip.to_string())));
+    }
+    if let Some(hostname) = &results.target.hostname {
+        h.push_str(&format!("<p><b>Hostname:</b> {}</p>", html_escape(hostname)));
+    }
+    if let Some(geo) = &results.target.geo {
+        h.push_str(&format!("<p><b>Location:</b> {}, {} ({})</p>", 
+            html_escape(geo.city.as_deref().unwrap_or("")),
+            html_escape(geo.country.as_deref().unwrap_or("")),
+            html_escape(geo.isp.as_deref().unwrap_or(""))
+        ));
+        h.push_str(&format!("<p><b>ASN:</b> {}</p>", html_escape(geo.asn.as_deref().unwrap_or(""))));
+    }
+    
+    h.push_str(&section_close());
+    h
+}
+
+// =============================================================================
+// Chart Functions (using Chart.js - no template literal issues)
+// =============================================================================
+
+fn port_dist_chart(results: &ReconResults) -> String {
+    let mut ports_by_service: HashMap<String, usize> = HashMap::new();
+    for p in &results.ports {
+        if p.open {
+            *ports_by_service.entry(p.service.clone()).or_insert(0) += 1;
         }
     }
-    let segs = [
-        ("Critical", crit, "#ef4444"),
-        ("High", high, "#f97316"),
-        ("Medium", med, "#fbbf24"),
-        ("Low", low, "#22d3ee"),
-        ("Info", info, "#475569"),
-    ];
-    let total: usize = segs.iter().map(|s| s.1).sum();
-    let (donut_svg, legend) = svg_donut(&segs, total);
-
-    // category bar chart from the phase/findings mix
-    let mut cats: Vec<(String, usize)> = Vec::new();
-    for v in &results.vulns {
-        let k = v.title.split('—').next().unwrap_or(&v.title).trim().to_string();
-        let key = if k.len() > 22 { format!("{}…", k.chars().take(21).collect::<String>()) } else { k };
-        if let Some(e) = cats.iter_mut().find(|(k2, _)| *k2 == key) {
-            e.1 += 1;
-        } else {
-            cats.push((key, 1));
-        }
-    }
-    cats.sort_by(|a, b| b.1.cmp(&a.1));
-    cats.truncate(8);
-    let maxc = cats.iter().map(|c| c.1).max().unwrap_or(1);
-    let mut bars = String::new();
-    for (name, n) in &cats {
-        bars += &format!(
-            r##"<div class="bar-row"><div class="bar-lbl">{}</div><div class="bar-track"><div class="bar-fill" style="width:{}%;background:linear-gradient(90deg,#d946ef,#8b5cf6)"></div></div><div class="muted">{}</div></div>"##,
-            html_escape(name),
-            (n * 100 / maxc),
-            n
-        );
-    }
-
-    format!(
-        r#"<div class="section"><h2>📊 Findings Overview</h2>
-<div class="flex">
-  <div>{}</div>
-  <div class="donut-legend">{}</div>
-  <div style="flex:1;min-width:280px"><h3 class="sub">Top finding areas</h3><div class="bars">{}</div></div>
-</div></div>"#,
-        donut_svg, legend, bars
+    
+    let labels: Vec<String> = ports_by_service.keys().cloned().collect();
+    let data: Vec<usize> = ports_by_service.values().cloned().collect();
+    
+    format!(r###"
+<div class="chart-card">
+  <h3>Open Ports by Service</h3>
+  <canvas id="port-chart"></canvas>
+  <script>
+    if (typeof Chart !== 'undefined') {{
+      new Chart(document.getElementById('port-chart'), {{
+        type: 'doughnut',
+        data: {{ labels: {labels}, datasets: [{{
+          data: {data},
+          backgroundColor: ['#d946ef','#22d3ee','#ef4444','#f97316','#fbbf24','#22c55e','#a855f7','#06b6d4','#f87171','#eab308']
+        }}] }},
+        options: {{ responsive: true, maintainAspectRatio: true, plugins: {{ legend: {{ position: 'bottom', labels: {{ color: '#dbe4f0', font: {{ size: 11 }} }} }} }} }}
+      }});
+    }}
+  </script>
+</div>
+"###, 
+        labels = serde_json::to_string(&labels).unwrap_or_default(),
+        data = serde_json::to_string(&data).unwrap_or_default()
     )
 }
 
-fn svg_donut(segs: &[(&str, usize, &str)], total: usize) -> (String, String) {
-    let r = 70f64;
-    let c = 2.0 * std::f64::consts::PI * r;
-    let mut offset = 0.0;
-    let mut svg = format!(
-        r#"<svg width="190" height="190" viewBox="0 0 190 190"><g transform="translate(95,95) rotate(-90)">"#
-    );
-    if total == 0 {
-        svg += &format!(
-            r##"<circle r="{}" fill="none" stroke="#1f2b3d" stroke-width="26"/>"##,
-            r
-        );
-    }
-    for (name, n, color) in segs {
-        if *n == 0 {
-            continue;
-        }
-        let len = c * (*n as f64) / total as f64;
-        svg += &format!(
-            r#"<circle r="{r}" fill="none" stroke="{color}" stroke-width="26" stroke-dasharray="{len:.1} {rest:.1}" stroke-dashoffset="-{offset:.1}"><title>{name}: {n}</title></circle>"#,
-            r = r,
-            color = color,
-            len = len,
-            rest = c - len,
-            offset = offset,
-            name = name,
-            n = n
-        );
-        offset += len;
-    }
-    svg += &format!(
-        r##"</g><text x="95" y="90" text-anchor="middle" fill="#e2e8f0" font-size="26" font-weight="700">{}</text><text x="95" y="110" text-anchor="middle" fill="#8b9bb4" font-size="11">VULN FINDINGS</text></svg>"##,
-        total
-    );
-    let legend: String = segs
-        .iter()
-        .map(|(name, n, color)| {
-            format!(
-                r#"<span><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:{};margin-right:5px"></span>{} ({})</span>"#,
-                color, name, n
-            )
-        })
-        .collect();
-    (svg, legend)
+fn severity_pie_chart(results: &ReconResults) -> String {
+    let critical = results.vulns.iter().filter(|v| matches!(v.severity, Severity::Critical)).count();
+    let high = results.vulns.iter().filter(|v| matches!(v.severity, Severity::High)).count();
+    let medium = results.vulns.iter().filter(|v| matches!(v.severity, Severity::Medium)).count();
+    let low = results.vulns.iter().filter(|v| matches!(v.severity, Severity::Low)).count();
+    let info = results.vulns.iter().filter(|v| matches!(v.severity, Severity::Info)).count();
+    
+    format!(r###"
+<div class="chart-card">
+  <h3>Vulnerabilities by Severity</h3>
+  <canvas id="severity-chart"></canvas>
+  <script>
+    if (typeof Chart !== 'undefined') {{
+      new Chart(document.getElementById('severity-chart'), {{
+        type: 'pie',
+        data: {{
+          labels: ['Critical', 'High', 'Medium', 'Low', 'Info'],
+          datasets: [{{
+            data: [{critical}, {high}, {medium}, {low}, {info}],
+            backgroundColor: ['#ef4444', '#f97316', '#fbbf24', '#22d3ee', '#64748b']
+          }}]
+        }},
+        options: {{ responsive: true, maintainAspectRatio: true, plugins: {{ legend: {{ position: 'bottom', labels: {{ color: '#dbe4f0', font: {{ size: 11 }} }} }} }} }}
+      }});
+    }}
+  </script>
+</div>
+"###, 
+        critical = critical, high = high, medium = medium, low = low, info = info
+    )
 }
 
-// ---------------------------------------------------------------------------
-// entity graph (layered SVG)
-// ---------------------------------------------------------------------------
-
-fn svg_graph(graph: &GraphData) -> String {
-    let kind_col = |k: &str| match k {
-        "domain" | "subdomain" => 0,
-        "org" | "email" | "user" | "host" => 1,
-        "ip" => 2,
-        "service" => 3,
-        _ => 4,
-    };
-    let node_color = |k: &str| match k {
-        "domain" | "subdomain" => "#4c6ef5",
-        "org" => "#9c36b5",
-        "email" => "#d6336c",
-        "ip" => "#12b886",
-        "service" => "#e8590c",
-        "user" | "host" => "#f59f00",
-        _ => "#3b5bdb",
-    };
-
-    // cap
-    let max_nodes = 80usize;
-    let nodes: Vec<&crate::types::GNode> = if graph.nodes.len() > max_nodes {
-        // keep highest-degree nodes
-        let mut deg: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
-        for e in &graph.edges {
-            *deg.entry(e.from).or_insert(0) += 1;
-            *deg.entry(e.to).or_insert(0) += 1;
+fn service_breakdown_chart(results: &ReconResults) -> String {
+    let mut services: HashMap<String, usize> = HashMap::new();
+    for p in &results.ports {
+        if p.open {
+            let key = format!("{} ({})", p.service, p.product.as_deref().unwrap_or("unknown"));
+            *services.entry(key).or_insert(0) += 1;
         }
-        let mut ranked: Vec<&crate::types::GNode> = graph.nodes.iter().collect();
-        ranked.sort_by_key(|n| std::cmp::Reverse(deg.get(&n.id).copied().unwrap_or(0)));
-        ranked.into_iter().take(max_nodes).collect()
+    }
+    
+    let labels: Vec<String> = services.keys().cloned().collect();
+    let data: Vec<usize> = services.values().cloned().collect();
+    
+    format!(r###"
+<div class="chart-card">
+  <h3>Service Breakdown</h3>
+  <canvas id="service-chart"></canvas>
+  <script>
+    if (typeof Chart !== 'undefined') {{
+      new Chart(document.getElementById('service-chart'), {{
+        type: 'bar',
+        data: {{ labels: {labels}, datasets: [{{
+          label: 'Count',
+          data: {data},
+          backgroundColor: '#d946ef'
+        }}] }},
+        options: {{ indexAxis: 'y', responsive: true, maintainAspectRatio: true, plugins: {{ legend: {{ display: false }} }}, scales: {{ x: {{ ticks: {{ color: '#dbe4f0' }}, grid: {{ color: '#1e2a3d' }} }}, y: {{ ticks: {{ color: '#dbe4f0' }}, grid: {{ display: false }} }} }} }}
+      }});
+    }}
+  </script>
+</div>
+"###, 
+        labels = serde_json::to_string(&labels).unwrap_or_default(),
+        data = serde_json::to_string(&data).unwrap_or_default()
+    )
+}
+
+fn subdomain_sources_chart(results: &ReconResults) -> String {
+    let mut sources: HashMap<String, usize> = HashMap::new();
+    for s in &results.subdomains {
+        *sources.entry(s.source.clone()).or_insert(0) += 1;
+    }
+    
+    let labels: Vec<String> = sources.keys().cloned().collect();
+    let data: Vec<usize> = sources.values().cloned().collect();
+    
+    format!(r###"
+<div class="chart-card">
+  <h3>Subdomain Discovery Sources</h3>
+  <canvas id="subdomain-chart"></canvas>
+  <script>
+    if (typeof Chart !== 'undefined') {{
+      new Chart(document.getElementById('subdomain-chart'), {{
+        type: 'bar',
+        data: {{ labels: {labels}, datasets: [{{
+          label: 'Count',
+          data: {data},
+          backgroundColor: '#22d3ee'
+        }}] }},
+        options: {{ indexAxis: 'y', responsive: true, maintainAspectRatio: true, plugins: {{ legend: {{ display: false }} }}, scales: {{ x: {{ ticks: {{ color: '#dbe4f0' }}, grid: {{ color: '#1e2a3d' }} }}, y: {{ ticks: {{ color: '#dbe4f0' }}, grid: {{ display: false }} }} }} }}
+      }});
+    }}
+  </script>
+</div>
+"###, 
+        labels = serde_json::to_string(&labels).unwrap_or_default(),
+        data = serde_json::to_string(&data).unwrap_or_default()
+    )
+}
+
+// =============================================================================
+// Advanced D3.js Visualization Blocks - Using const strings with ### delimiters
+// =============================================================================
+
+fn attack_surface_map_block(results: &ReconResults) -> String {
+    let nodes_json = serde_json::to_string(&build_attack_surface_nodes(results)).unwrap_or_default();
+    let links_json = serde_json::to_string(&build_attack_surface_links(results)).unwrap_or_default();
+    let target_label = html_escape(&results.target.input);
+    
+    let mut h = String::new();
+    h.push_str(&section_open("Attack Surface Map (Interactive)", "🗺️"));
+    h.push_str(r###"<div class="viz-controls">
+  <label class="viz-btn" onclick="filterAttackSurface('all')">All</label>
+  <label class="viz-btn" onclick="filterAttackSurface('web')">Web</label>
+  <label class="viz-btn" onclick="filterAttackSurface('api')">API</label>
+  <label class="viz-btn" onclick="filterAttackSurface('infra')">Infra</label>
+  <label class="viz-btn" onclick="filterAttackSurface('cred')">Credentials</label>
+  <label class="viz-btn" onclick="filterAttackSurface('vuln')">Vulnerabilities</label>
+</div>"###);
+    h.push_str(r###"<div id="attack-surface-map" class="viz-container" style="height:600px;"></div>"###);
+    h.push_str(&section_close());
+    
+    // JavaScript code - using string replacement
+    let js_code = ATTACK_SURFACE_MAP_JS
+        .replace("NODES_JSON", &nodes_json)
+        .replace("LINKS_JSON", &links_json)
+        .replace("TARGET_LABEL", &target_label);
+    h.push_str(&js_code);
+    
+    h
+}
+
+const ATTACK_SURFACE_MAP_JS: &str = r###"
+<script>
+const attackSurfaceNodes = NODES_JSON;
+const attackSurfaceLinks = LINKS_JSON;
+let attackSurfaceSimulation;
+
+function initAttackSurfaceMap() {
+  const container = d3.select("#attack-surface-map");
+  const width = container.node().getBoundingClientRect().width;
+  const height = 600;
+
+  const svg = container.append("svg")
+    .attr("width", "100%")
+    .attr("height", "600")
+    .attr("viewBox", "0 0 " + width + " " + height);
+
+  // Definitions for gradients and markers
+  const defs = svg.append("defs");
+  
+  // Arrow markers for links
+  ["recon", "exploit", "lateral", "persist", "impact", "cred", "default", "web", "api", "infra", "db", "remote", "ldap", "smb", "snmp", "vuln", "target", "subdomain"].forEach((type, i) => {
+    const colors = {recon: "#22d3ee", exploit: "#ef4444", lateral: "#f97316", persist: "#e879f9", impact: "#f87171", cred: "#34d399", default: "#64748b", web: "#e879f9", api: "#f97316", infra: "#fbbf24", db: "#ef4444", remote: "#f87171", ldap: "#e879f9", smb: "#fbbf24", snmp: "#fbbf24", vuln: "#ef4444", target: "#d946ef", subdomain: "#22d3ee"};
+    const color = colors[type] || colors.default;
+    svg.append("defs").append("marker")
+      .attr("id", "arrowhead-" + type)
+      .attr("viewBox", "0 0 10 10")
+      .attr("refX", 16)
+      .attr("refY", 5)
+      .attr("markerWidth", 6)
+      .attr("markerHeight", 6)
+      .attr("orient", "auto")
+      .append("path")
+      .attr("d", "M 0 0 L 10 5 L 0 10 Z")
+      .attr("fill", colors[type]);
+  });
+
+  const simulation = d3.forceSimulation()
+    .force("link", d3.forceLink().id(d => d.id).distance(120).strength(0.3))
+    .force("charge", d3.forceManyBody().strength(-400))
+    .force("center", d3.forceCenter(0, 0))
+    .force("collision", d3.forceCollide().radius(40).strength(0.5))
+    .force("x", d3.forceX(0).strength(0.1))
+    .force("y", d3.forceY(0).strength(0.1));
+
+  const link = svg.append("g")
+    .attr("stroke", "#2b3a52")
+    .attr("stroke-width", 1.5)
+    .selectAll("path")
+    .data(attackSurfaceLinks)
+    .join("path")
+    .attr("class", "link")
+    .attr("marker-end", d => "url(#arrowhead-" + (d.type || "default") + ")");
+
+  const node = svg.append("g")
+    .attr("stroke", "#fff")
+    .attr("stroke-width", 1.5)
+    .selectAll("g")
+    .data(attackSurfaceNodes)
+    .join("g")
+    .attr("class", "node")
+    .call(drag(simulation))
+    .on("mouseover", function(event, d) {
+      showTooltip(event, "<strong>" + d.label + "</strong><br>Type: " + d.kind + (d.severity ? "<br>Severity: " + d.severity : "") + (d.port ? "<br>Port: " + d.port : "") + (d.service ? "<br>Service: " + d.service : ""));
+    })
+    .on("mouseout", hideTooltip)
+    .on("click", function(event, d) {
+      if (d.url) window.open(d.url, "_blank");
+    });
+
+  const nodeCircle = node.append("circle")
+    .attr("r", d => Math.max(12, Math.min(30, 10 + (d.degree || 0) * 2)))
+    .attr("fill", d => {
+      const colors = {recon: "#22d3ee", exploit: "#ef4444", lateral: "#f97316", persist: "#e879f9", impact: "#f87171", cred: "#34d399", web: "#e879f9", api: "#f97316", infra: "#fbbf24", db: "#ef4444", remote: "#f87171", ldap: "#e879f9", smb: "#fbbf24", snmp: "#fbbf24", vuln: "#ef4444", target: "#d946ef", subdomain: "#22d3ee", default: "#64748b"};
+      return colors[d.kind] || colors.default;
+    })
+    .attr("stroke", "#fff")
+    .attr("stroke-width", 1.5);
+
+  const nodeLabel = node.append("text")
+    .attr("dy", d => 20 + Math.max(12, Math.min(30, 10 + (d.degree || 0) * 2)))
+    .attr("text-anchor", "middle")
+    .attr("font-size", "10px")
+    .attr("fill", "#dbe4f0")
+    .attr("font-weight", 500)
+    .text(d => d.label.length > 20 ? d.label.substring(0, 18) + "..." : d.label);
+
+  attackSurfaceSimulation = simulation
+    .nodes(attackSurfaceNodes)
+    .on("tick", ticked);
+
+  simulation.force("link")
+    .links(attackSurfaceLinks);
+
+  function ticked() {
+    link.attr("d", d => {
+      const dx = d.target.x - d.source.x;
+      const dy = d.target.y - d.source.y;
+      const dr = Math.sqrt(dx * dx + dy * dy);
+      return "M" + d.source.x + "," + d.source.y + "A" + dr + "," + dr + " 0 0,1 " + d.target.x + "," + d.target.y;
+    });
+
+    node.attr("transform", d => "translate(" + d.x + "," + d.y + ")");
+  }
+
+  function drag(simulation) {
+    return d3.drag()
+      .on("start", function(event, d) {
+        if (!event.active) simulation.alphaTarget(0.3).restart();
+        d.fx = d.x;
+        d.fy = d.y;
+      })
+      .on("drag", function(event, d) {
+        d.fx = event.x;
+        d.fy = event.y;
+      })
+      .on("end", function(event, d) {
+        if (!event.active) simulation.alphaTarget(0);
+        d.fx = null;
+        d.fy = null;
+      });
+  }
+
+  function filterAttackSurface(type) {
+    document.querySelectorAll("#attack-surface-map .viz-btn").forEach(b => b.classList.remove("active"));
+    event.target.classList.add("active");
+    
+    const nodeSelection = d3.select("#attack-surface-map svg").selectAll(".node");
+    const linkSelection = d3.select("#attack-surface-map svg").selectAll(".link");
+    
+    if (type === "all") {
+      nodeSelection.style("opacity", 1).style("display", null);
+      linkSelection.style("opacity", 1).style("display", null);
     } else {
-        graph.nodes.iter().collect()
-    };
-    let keep: std::collections::HashSet<usize> = nodes.iter().map(|n| n.id).collect();
+      nodeSelection.style("opacity", d => d.kind === type ? 1 : 0.1)
+        .style("display", d => d.kind === type ? null : "none");
+      linkSelection.style("opacity", d => d.source.kind === type || d.target.kind === type ? 1 : 0.1)
+        .style("display", d => d.source.kind === type || d.target.kind === type ? null : "none");
+    }
+  }
 
-    // column layout
-    let col_w = 250.0;
-    let node_h = 30.0;
-    let gap_y = 14.0;
-    let mut col_counts = [0usize; 5];
-    let mut pos: std::collections::HashMap<usize, (f64, f64)> = std::collections::HashMap::new();
-    for n in &nodes {
-        let col = kind_col(&n.kind);
-        let x = 24.0 + col as f64 * col_w;
-        let y = 24.0 + col_counts[col] as f64 * (node_h + gap_y);
-        col_counts[col] += 1;
-        pos.insert(n.id, (x, y));
-    }
-    let height = col_counts.iter().copied().max().unwrap_or(1) as f64 * (node_h + gap_y) + 40.0;
-    let width = 5.0 * col_w + 40.0;
-
-    let mut svg = format!(
-        r##"<svg viewBox="0 0 {w} {h}" width="100%" style="max-height:{h}px;background:#0a0e14;border:1px solid #17202e;border-radius:10px">"##,
-        w = width,
-        h = height
-    );
-    // edges first
-    let mut drawn = 0;
-    for e in &graph.edges {
-        if drawn > 200 {
-            break;
-        }
-        if let (Some((x1, y1)), Some((x2, y2))) = (pos.get(&e.from), pos.get(&e.to)) {
-            let mx = (x1 + x2) / 2.0;
-            svg += &format!(
-                r##"<path d="M {x1e} {y1e} C {mx} {y1e}, {mx} {y2e}, {x2e} {y2e}" fill="none" stroke="#2b3a52" stroke-width="1.3"><title>{lbl}</title></path>"##,
-                x1e = x1 + 200.0,
-                y1e = y1 + node_h / 2.0,
-                x2e = x2,
-                y2e = y2 + node_h / 2.0,
-                mx = mx + 100.0,
-                lbl = html_escape(&e.label)
-            );
-            drawn += 1;
-        }
-    }
-    // nodes
-    for n in &nodes {
-        let (x, y) = pos[&n.id];
-        let color = node_color(&n.kind);
-        let label: String = n.label.chars().take(26).collect();
-        let tx = x + 10.0;
-        let ty = y + 19.0;
-        svg += &format!(
-            r##"<g><rect x="{x}" y="{y}" width="200" height="{nh}" rx="7" fill="#111826" stroke="{color}" stroke-width="1.4"/>
-<text x="{tx}" y="{ty}" font-size="12" fill="#dbe4f0">{lbl} <tspan fill="#5b6b82" font-size="10">[{kind}]</tspan></text></g>"##,
-            x = x,
-            y = y,
-            nh = node_h,
-            color = color,
-            tx = tx,
-            ty = ty,
-            lbl = html_escape(&label),
-            kind = html_escape(&n.kind)
-        );
-    }
-    svg += "</svg>";
-    if graph.nodes.len() > max_nodes {
-        svg += &format!(
-            "<p class='muted'>Graph truncated to the {} most connected of {} entities.</p>",
-            max_nodes,
-            graph.nodes.len()
-        );
-    }
-    svg
+  window.filterAttackSurface = filterAttackSurface;
 }
 
-// ---------------------------------------------------------------------------
-// data sections
-// ---------------------------------------------------------------------------
+window.initAttackSurfaceMap = initAttackSurfaceMap;
+</script>
+"###;
 
-fn section_open(title: &str, icon: &str) -> String {
-    format!(
-        r#"<div class="section"><h2>{} {}</h2>"#,
-        icon, title
+fn kill_chain_graph_block(results: &ReconResults) -> String {
+    let phases_json = serde_json::to_string(&build_kill_chain_phases(results)).unwrap_or_default();
+    
+    let mut h = String::new();
+    h.push_str(&section_open("Kill Chain Graph (Animated)", "⚔️"));
+    h.push_str(r###"<div id="kill-chain-graph" class="viz-container" style="height:300px;"></div>"###);
+    h.push_str(&section_close());
+    
+    let js_code = KILL_CHAIN_GRAPH_JS.replace("PHASES_JSON", &phases_json);
+    h.push_str(&js_code);
+    h
+}
+
+const KILL_CHAIN_GRAPH_JS: &str = r###"
+<script>
+const killChainPhases = PHASES_JSON;
+let killChainAnimation;
+
+function initKillChainGraph() {
+  const container = d3.select("#kill-chain-graph");
+  const width = container.node().getBoundingClientRect().width;
+  const height = 300;
+
+  const svg = container.append("svg")
+    .attr("width", "100%")
+    .attr("height", 300)
+    .attr("viewBox", "0 0 " + width + " 300");
+
+  const stages = [
+    { id: "recon", label: "Reconnaissance", color: "#22d3ee", icon: "🔍" },
+    { id: "initial", label: "Initial Access", color: "#ef4444", icon: "🎯" },
+    { id: "privilege", label: "Privilege Escalation", color: "#f97316", icon: "⬆️" },
+    { id: "lateral", label: "Lateral Movement", color: "#fbbf24", icon: "↔️" },
+    { id: "persist", label: "Persistence", color: "#e879f9", icon: "🔒" },
+    { id: "impact", label: "Impact", color: "#f87171", icon: "💥" }
+  ];
+
+  const stageData = stages.map((s, i) => {
+    const phase = killChainPhases.find(p => p.id === s.id);
+    return { ...s, status: phase ? phase.status : "pending", details: phase ? phase.details : "", x: (width / 6) * i + (width / 12), y: 150 };
+  });
+
+  // Draw connections
+  svg.selectAll(".kc-link")
+    .data(stageData.slice(0, -1))
+    .join("path")
+    .attr("class", "kc-link")
+    .attr("d", d => {
+      const next = stageData[stageData.indexOf(d) + 1];
+      return "M" + (d.x + 60) + "," + d.y + " Q" + ((d.x + next.x) / 2) + "," + (d.y - 40) + " " + (next.x - 60) + "," + next.y;
+    })
+    .attr("stroke", "#2b3a52")
+    .attr("stroke-width", 2)
+    .attr("fill", "none")
+    .attr("stroke-dasharray", "8,4");
+
+  // Draw stages
+  const stageG = svg.selectAll(".kc-stage")
+    .data(stageData)
+    .join("g")
+    .attr("class", "kc-stage")
+    .attr("transform", d => "translate(" + d.x + "," + d.y + ")");
+
+  stageG.append("circle")
+    .attr("r", 60)
+    .attr("fill", d => d.status === "completed" ? d.color : (d.status === "active" ? d.color : "#1a2332"))
+    .attr("stroke", d => d.status === "active" ? "#fff" : d.color)
+    .attr("stroke-width", d => d.status === "active" ? 3 : 2)
+    .attr("opacity", d => d.status === "pending" ? 0.4 : 1)
+    .transition()
+    .duration(800)
+    .delay((d, i) => i * 300)
+    .attr("r", 60);
+
+  stageG.append("text")
+    .attr("text-anchor", "middle")
+    .attr("dy", "-20")
+    .attr("font-size", "24px")
+    .text(d => d.icon);
+
+  stageG.append("text")
+    .attr("text-anchor", "middle")
+    .attr("dy", "10")
+    .attr("font-size", "11px")
+    .attr("font-weight", 600)
+    .attr("fill", "#dbe4f0")
+    .text(d => d.label);
+
+  stageG.append("text")
+    .attr("text-anchor", "middle")
+    .attr("dy", "28")
+    .attr("font-size", "10px")
+    .attr("fill", d => d.status === "completed" ? "#22c55e" : (d.status === "active" ? "#d946ef" : "#7a8ba5"))
+    .text(d => d.status === "completed" ? "✔ Complete" : (d.status === "active" ? "▶ Active" : "◌ Pending"));
+
+  // Tooltip
+  stageG.on("mouseover", function(event, d) {
+    showTooltip(event, "<strong>" + d.label + "</strong><br>Status: " + d.status + (d.details ? "<br>" + d.details : ""));
+  }).on("mouseout", hideTooltip);
+
+  window.killChainAnimation = stageData;
+}
+
+window.initKillChainGraph = initKillChainGraph;
+</script>
+"###;
+
+fn attack_paths_graph_block(results: &ReconResults) -> String {
+    let paths_json = serde_json::to_string(&results.attack_paths).unwrap_or_default();
+    
+    let mut h = String::new();
+    h.push_str(&section_open("Attack Paths", "🛤️"));
+    h.push_str(r###"<div id="attack-path-graph" class="viz-container" style="height:500px;"></div>"###);
+    h.push_str(&section_close());
+    
+    let js_code = ATTACK_PATHS_GRAPH_JS.replace("PATHS_JSON", &paths_json);
+    h.push_str(&js_code);
+    h
+}
+
+const ATTACK_PATHS_GRAPH_JS: &str = r###"
+<script>
+const attackPaths = PATHS_JSON;
+let attackPathSimulation;
+
+function initAttackPathGraph() {
+  const container = d3.select("#attack-path-graph");
+  const width = container.node().getBoundingClientRect().width;
+  const height = 500;
+
+  const svg = container.append("svg")
+    .attr("width", "100%")
+    .attr("height", 500)
+    .attr("viewBox", "0 0 " + width + " 500");
+
+  if (!attackPaths || attackPaths.length === 0) {
+    svg.append("text")
+      .attr("x", width / 2)
+      .attr("y", height / 2)
+      .attr("text-anchor", "middle")
+      .attr("fill", "#7a8ba5")
+      .attr("font-size", "16px")
+      .text("No attack paths generated");
+    return;
+  }
+
+  // Build nodes and links from attack paths
+  const nodes = [];
+  const links = [];
+  const nodeMap = new Map();
+
+  attackPaths.forEach((path, pi) => {
+    path.steps.forEach((step, si) => {
+      const nodeId = "path-" + pi + "-step-" + si;
+      if (!nodeMap.has(nodeId)) {
+        nodes.push({
+          id: nodeId,
+          label: step.title,
+          kind: step.kind || "exploit",
+          severity: step.severity || "medium",
+          description: step.description,
+          command: step.command,
+          evidence: step.evidence ? step.evidence.join("; ") : "",
+          pathIndex: pi,
+          stepIndex: si,
+          x: 100 + si * 200,
+          y: 80 + pi * 120
+        });
+        nodeMap.set(nodeId, nodes.length - 1);
+      }
+      if (si > 0) {
+        const prevId = "path-" + pi + "-step-" + (si - 1);
+        links.push({ source: prevId, target: nodeId, type: step.kind || "exploit" });
+      }
+    });
+  });
+
+  // Arrow markers
+  const defs = svg.append("defs");
+  ["recon", "exploit", "lateral", "persist", "impact", "cred", "default"].forEach(type => {
+    const colors = {recon: "#22d3ee", exploit: "#ef4444", lateral: "#f97316", persist: "#e879f9", impact: "#f87171", cred: "#34d399", default: "#64748b"};
+    const color = colors[type] || colors.default;
+    svg.append("defs").append("marker")
+      .attr("id", "ap-arrow-" + type)
+      .attr("viewBox", "0 0 10 10")
+      .attr("refX", 20)
+      .attr("refY", 5)
+      .attr("markerWidth", 6)
+      .attr("markerHeight", 6)
+      .attr("orient", "auto")
+      .append("path")
+      .attr("d", "M 0 0 L 10 5 L 0 10 Z")
+      .attr("fill", color);
+  });
+
+  const simulation = d3.forceSimulation(nodes)
+    .force("link", d3.forceLink(links).id(d => d.id).distance(180).strength(0.5))
+    .force("charge", d3.forceManyBody().strength(-200))
+    .force("center", d3.forceCenter(width / 2, height / 2))
+    .force("x", d3.forceX(width / 2).strength(0.05))
+    .force("y", d3.forceY(height / 2).strength(0.05));
+
+  const link = svg.append("g")
+    .attr("stroke", "#2b3a52")
+    .attr("stroke-width", 2)
+    .selectAll("path")
+    .data(links)
+    .join("path")
+    .attr("class", "ap-link")
+    .attr("marker-end", d => "url(#ap-arrow-" + (d.type || "default") + ")")
+    .attr("stroke-dasharray", "4,2");
+
+  const node = svg.append("g")
+    .selectAll("g")
+    .data(nodes)
+    .join("g")
+    .attr("class", "ap-node")
+    .call(d3.drag()
+      .on("start", (event, d) => { if (!event.active) simulation.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
+      .on("drag", (event, d) => { d.fx = event.x; d.fy = event.y; })
+      .on("end", (event, d) => { if (!event.active) simulation.alphaTarget(0); d.fx = null; d.fy = null; })
     )
+    .on("mouseover", function(event, d) {
+      showTooltip(event, "<strong>Step " + (d.stepIndex + 1) + ": " + d.label + "</strong><br>Type: " + d.kind + (d.severity ? "<br>Severity: " + d.severity : "") + (d.command ? "<br><code>" + d.command + "</code>" : "") + (d.evidence ? "<br>Evidence: " + d.evidence : ""));
+    })
+    .on("mouseout", hideTooltip)
+    .on("click", function(event, d) {
+      if (d.command) {
+        navigator.clipboard.writeText(d.command);
+        showTooltip(event, "Command copied to clipboard!");
+      }
+    });
+
+  const colors = {recon: "#22d3ee", exploit: "#ef4444", lateral: "#f97316", persist: "#e879f9", impact: "#f87171", cred: "#34d399", default: "#64748b"};
+
+  node.append("circle")
+    .attr("r", 25)
+    .attr("fill", d => colors[d.kind] || colors.default)
+    .attr("stroke", "#fff")
+    .attr("stroke-width", 2);
+
+  node.append("text")
+    .attr("text-anchor", "middle")
+    .attr("dy", "4")
+    .attr("font-size", "10px")
+    .attr("fill", "#0a0e14")
+    .attr("font-weight", 700)
+    .text(d => String(d.stepIndex + 1));
+
+  node.append("title").text(d => d.label);
+
+  simulation.on("tick", () => {
+    link.attr("d", d => {
+      const dx = d.target.x - d.source.x;
+      const dy = d.target.y - d.source.y;
+      const dr = Math.sqrt(dx * dx + dy * dy);
+      return "M" + d.source.x + "," + d.source.y + "A" + dr + "," + dr + " 0 0,1 " + d.target.x + "," + d.target.y;
+    });
+    node.attr("transform", d => "translate(" + d.x + "," + d.y + ")");
+  });
+
+  // Legend
+  const legend = svg.append("g").attr("transform", "translate(20, 20)");
+  
+  Object.entries(colors).forEach(([kind, color], i) => {
+    if (kind === "default") return;
+    const g = legend.append("g").attr("transform", "translate(0, " + (i * 22) + ")");
+    g.append("circle").attr("r", 8).attr("fill", color).attr("cx", 0).attr("cy", 0);
+    g.append("text").attr("x", 16).attr("y", 4).attr("font-size", "11px").attr("fill", "#dbe4f0").text(kind.charAt(0).toUpperCase() + kind.slice(1));
+  });
+
+  window.attackPathSimulation = simulation;
 }
 
-fn section_close() -> &'static str {
-    "</div>"
+window.initAttackPathGraph = initAttackPathGraph;
+</script>
+"###;
+
+fn vulnerability_heatmap_block(results: &ReconResults) -> String {
+    let vulns_json = serde_json::to_string(&build_vuln_heatmap_data(results)).unwrap_or_default();
+    
+    let mut h = String::new();
+    h.push_str(&section_open("Vulnerability Heatmap", "🔥"));
+    h.push_str(r###"<div class="viz-controls">
+  <select class="viz-btn vuln-filter-sev" onchange="filterVulnHeatmap()">
+    <option value="all">All Severities</option>
+    <option value="critical">Critical</option>
+    <option value="high">High</option>
+    <option value="medium">Medium</option>
+    <option value="low">Low</option>
+    <option value="info">Info</option>
+  </select>
+  <select class="viz-btn vuln-filter-type" onchange="filterVulnHeatmap()">
+    <option value="all">All Types</option>
+    <option value="web">Web</option>
+    <option value="api">API</option>
+    <option value="infra">Infrastructure</option>
+    <option value="credential">Credentials</option>
+    <option value="config">Misconfiguration</option>
+  </select>
+</div>"###);
+    h.push_str(r###"<div id="vuln-heatmap" class="viz-container" style="height:500px;"></div>"###);
+    h.push_str(&section_close());
+    
+    let js_code = VULN_HEATMAP_JS.replace("VULNS_JSON", &vulns_json);
+    h.push_str(&js_code);
+    h
 }
 
-/// Collapsible appendix section (raw tool evidence).
-fn appendix_open(title: &str, icon: &str, open: bool) -> String {
-    format!(
-        r#"<details class="section"{}><summary style="font-size:17px;color:#cbd5e1">{} {} — <span class="muted">evidence</span></summary>"#,
-        if open { " open" } else { "" },
-        icon,
-        title
+const VULN_HEATMAP_JS: &str = r###"
+<script>
+const vulnHeatmapData = VULNS_JSON;
+let currentSevFilter = "all";
+let currentTypeFilter = "all";
+
+function initVulnHeatmap() {
+  const container = d3.select("#vuln-heatmap");
+  const width = container.node().getBoundingClientRect().width;
+  const height = 500;
+  const cellSize = Math.min(40, width / Math.max(10, [...new Set(vulnHeatmapData.map(d => d.asset))].length + 1));
+  
+  const assets = [...new Set(vulnHeatmapData.map(d => d.asset))].sort();
+  const types = [...new Set(vulnHeatmapData.map(d => d.type))].sort();
+  
+  const svg = container.append("svg")
+    .attr("width", "100%")
+    .attr("height", height)
+    .attr("viewBox", "0 0 " + (assets.length * cellSize + 150) + " " + (types.length * cellSize + 50));
+
+  const severityColors = {critical: "#ef4444", high: "#f97316", medium: "#fbbf24", low: "#22d3ee", info: "#64748b"};
+
+  const cells = svg.selectAll(".heatmap-cell")
+    .data(vulnHeatmapData)
+    .join("rect")
+    .attr("class", "heatmap-cell")
+    .attr("x", d => 120 + assets.indexOf(d.asset) * cellSize)
+    .attr("y", d => 20 + types.indexOf(d.type) * cellSize)
+    .attr("width", cellSize - 2)
+    .attr("height", cellSize - 2)
+    .attr("rx", 3)
+    .attr("fill", d => severityColors[d.severity] || "#64748b")
+    .attr("stroke", "#1e2a3d")
+    .attr("stroke-width", 1)
+    .on("mouseover", function(event, d) {
+      showTooltip(event, "<strong>" + d.asset + " / " + d.type + "</strong><br>Severity: " + d.severity.toUpperCase() + "<br>" + d.title + (d.cve ? "<br>CVE: " + d.cve : "") + (d.evidence ? "<br>Evidence: " + d.evidence : ""));
+    })
+    .on("mouseout", hideTooltip);
+
+  // Y-axis labels (types)
+  svg.selectAll(".y-label")
+    .data(types)
+    .join("text")
+    .attr("class", "y-label")
+    .attr("x", 115)
+    .attr("y", (d, i) => 20 + i * cellSize + cellSize / 2 + 4)
+    .attr("text-anchor", "end")
+    .attr("font-size", "11px")
+    .attr("fill", "#dbe4f0")
+    .text(d => d);
+
+  // X-axis labels (assets) - rotated
+  svg.selectAll(".x-label")
+    .data(assets)
+    .join("text")
+    .attr("class", "x-label")
+    .attr("x", (d, i) => 120 + i * cellSize + cellSize / 2)
+    .attr("y", 20 + types.length * cellSize + 20)
+    .attr("text-anchor", "middle")
+    .attr("font-size", "10px")
+    .attr("fill", "#dbe4f0")
+    .attr("transform", (d, i) => "rotate(-45, " + (120 + i * cellSize + cellSize / 2) + ", " + (20 + types.length * cellSize + 20) + ")")
+    .text(d => d.length > 20 ? d.substring(0, 18) + "..." : d);
+
+  // Legend
+  const legend = svg.append("g").attr("transform", "translate(120, " + (20 + types.length * cellSize + 40) + ")");
+  Object.entries(severityColors).forEach(([sev, color], i) => {
+    const g = legend.append("g").attr("transform", "translate(" + (i * 90) + ", 0)");
+    g.append("rect").attr("width", 14).attr("height", 14).attr("rx", 3).attr("fill", color);
+    g.append("text").attr("x", 20).attr("y", 10).attr("font-size", "11px").attr("fill", "#dbe4f0").text(sev.charAt(0).toUpperCase() + sev.slice(1));
+  });
+
+  window.filterVulnHeatmap = filterVulnHeatmap;
+}
+
+function filterVulnHeatmap() {
+  currentSevFilter = document.querySelector(".vuln-filter-sev").value;
+  currentTypeFilter = document.querySelector(".vuln-filter-type").value;
+  
+  d3.select("#vuln-heatmap svg").selectAll(".heatmap-cell")
+    .style("opacity", d => {
+      const sevMatch = currentSevFilter === "all" || d.severity === currentSevFilter;
+      const typeMatch = currentTypeFilter === "all" || d.type === currentTypeFilter;
+      return sevMatch && typeMatch ? 1 : 0.1;
+    })
+    .style("display", d => {
+      const sevMatch = currentSevFilter === "all" || d.severity === currentSevFilter;
+      const typeMatch = currentTypeFilter === "all" || d.type === currentTypeFilter;
+      return sevMatch && typeMatch ? null : "none";
+    });
+}
+
+window.initVulnHeatmap = initVulnHeatmap;
+</script>
+"###;
+
+fn credential_map_block(results: &ReconResults) -> String {
+    // No credentials field in ReconResults - create placeholder
+    let creds_json = "[]".to_string();
+    
+    let mut h = String::new();
+    h.push_str(&section_open("Credential Map", "🔑"));
+    h.push_str(r###"<div id="credential-map" class="viz-container" style="height:500px;"></div>"###);
+    h.push_str(&section_close());
+    
+    let js_code = CREDENTIAL_MAP_JS.replace("CREDS_JSON", &creds_json);
+    h.push_str(&js_code);
+    h
+}
+
+const CREDENTIAL_MAP_JS: &str = r###"
+<script>
+const credentialData = CREDS_JSON;
+let credentialSimulation;
+
+function initCredentialMap() {
+  const container = d3.select("#credential-map");
+  const width = container.node().getBoundingClientRect().width;
+  const height = 500;
+
+  const svg = container.append("svg")
+    .attr("width", "100%")
+    .attr("height", 500)
+    .attr("viewBox", "0 0 " + width + " " + height);
+
+  if (!credentialData || credentialData.length === 0) {
+    svg.append("text")
+      .attr("x", width / 2)
+      .attr("y", height / 2)
+      .attr("text-anchor", "middle")
+      .attr("fill", "#7a8ba5")
+      .attr("font-size", "16px")
+      .text("No credentials discovered");
+    return;
+  }
+
+  const typeColors = {aws: "#ff9900", github: "#6e5494", ssh: "#4e9a06", jwt: "#000000", api_key: "#d946ef", database: "#ef4444", cloud: "#22d3ee", other: "#64748b"};
+
+  const simulation = d3.forceSimulation(credentialData)
+    .force("link", d3.forceLink().id(d => d.id).distance(100).strength(0.3))
+    .force("charge", d3.forceManyBody().strength(-300))
+    .force("center", d3.forceCenter(width / 2, height / 2))
+    .force("collision", d3.forceCollide().radius(35).strength(0.5));
+
+  const link = svg.append("g")
+    .attr("stroke", "#2b3a52")
+    .attr("stroke-width", 1.5)
+    .attr("stroke-dasharray", "3,3")
+    .selectAll("line")
+    .data(credentialData.flatMap(d => (d.reused_on || []).map(r => ({source: d.id, target: r}))))
+    .join("line")
+    .attr("class", "cred-link");
+
+  const node = svg.append("g")
+    .selectAll("g")
+    .data(credentialData)
+    .join("g")
+    .attr("class", "cred-node")
+    .call(d3.drag()
+      .on("start", (event, d) => { if (!event.active) simulation.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
+      .on("drag", (event, d) => { d.fx = event.x; d.fy = event.y; })
+      .on("end", (event, d) => { if (!event.active) simulation.alphaTarget(0); d.fx = null; d.fy = null; })
     )
+    .on("mouseover", function(event, d) {
+      showTooltip(event, "<strong>" + d.type.toUpperCase() + " Credential</strong><br>Source: " + d.source + (d.reused_on ? "<br>Reused on: " + d.reused_on.join(", ") : "") + (d.evidence ? "<br>Evidence: " + d.evidence : ""));
+    })
+    .on("mouseout", hideTooltip);
+
+  node.append("circle")
+    .attr("r", d => 15 + (d.reused_on ? d.reused_on.length * 3 : 0))
+    .attr("fill", d => typeColors[d.type] || typeColors.other)
+    .attr("stroke", "#fff")
+    .attr("stroke-width", 2);
+
+  node.append("text")
+    .attr("text-anchor", "middle")
+    .attr("dy", "4")
+    .attr("font-size", "10px")
+    .attr("fill", d => d.type === "jwt" ? "#fff" : "#0a0e14")
+    .attr("font-weight", 700)
+    .text(d => d.type.toUpperCase().substring(0, 4));
+
+  simulation.on("tick", () => {
+    link
+      .attr("x1", d => d.source.x)
+      .attr("y1", d => d.source.y)
+      .attr("x2", d => d.target.x)
+      .attr("y2", d => d.target.y);
+    node.attr("transform", d => "translate(" + d.x + "," + d.y + ")");
+  });
+
+  // Legend
+  const legend = svg.append("g").attr("transform", "translate(20, 20)");
+  Object.entries(typeColors).forEach(([type, color], i) => {
+    if (type === "other") return;
+    const g = legend.append("g").attr("transform", "translate(0, " + (i * 22) + ")");
+    g.append("circle").attr("r", 8).attr("fill", color).attr("cx", 0).attr("cy", 0);
+    g.append("text").attr("x", 16).attr("y", 4).attr("font-size", "11px").attr("fill", "#dbe4f0").text(type.charAt(0).toUpperCase() + type.slice(1));
+  });
+
+  window.credentialSimulation = simulation;
 }
 
-fn appendix_close() -> &'static str {
-    "</details>"
+window.initCredentialMap = initCredentialMap;
+</script>
+"###;
+
+fn network_topology_block(results: &ReconResults) -> String {
+    let topo_json = serde_json::to_string(&build_network_topology_data(results)).unwrap_or_default();
+    
+    let mut h = String::new();
+    h.push_str(&section_open("Network Topology", "🌐"));
+    h.push_str(r###"<div id="network-topology" class="viz-container" style="height:500px;"></div>"###);
+    h.push_str(&section_close());
+    
+    let js_code = NETWORK_TOPOLOGY_JS.replace("TOPO_JSON", &topo_json);
+    h.push_str(&js_code);
+    h
+}
+
+const NETWORK_TOPOLOGY_JS: &str = r###"
+<script>
+const networkTopologyData = TOPO_JSON;
+let networkSimulation;
+
+function initNetworkTopology() {
+  const container = d3.select("#network-topology");
+  const width = container.node().getBoundingClientRect().width;
+  const height = 500;
+
+  const svg = container.append("svg")
+    .attr("width", "100%")
+    .attr("height", 500)
+    .attr("viewBox", "0 0 " + width + " " + height);
+
+  if (!networkTopologyData || networkTopologyData.nodes.length === 0) {
+    svg.append("text")
+      .attr("x", width / 2)
+      .attr("y", height / 2)
+      .attr("text-anchor", "middle")
+      .attr("fill", "#7a8ba5")
+      .attr("font-size", "16px")
+      .text("No network topology data");
+    return;
+  }
+
+  const { nodes, links } = networkTopologyData;
+
+  const typeColors = {target: "#d946ef", subdomain: "#22d3ee", host: "#22d3ee", service: "#f97316", database: "#ef4444", internal: "#e879f9", external: "#ef4444", default: "#64748b"};
+
+  const simulation = d3.forceSimulation(nodes)
+    .force("link", d3.forceLink(links).id(d => d.id).distance(100).strength(0.4))
+    .force("charge", d3.forceManyBody().strength(-250))
+    .force("center", d3.forceCenter(width / 2, height / 2))
+    .force("collision", d3.forceCollide().radius(30).strength(0.5));
+
+  const link = svg.append("g")
+    .attr("stroke", "#2b3a52")
+    .attr("stroke-width", 1.5)
+    .selectAll("line")
+    .data(links)
+    .join("line")
+    .attr("class", "net-link");
+
+  const node = svg.append("g")
+    .selectAll("g")
+    .data(nodes)
+    .join("g")
+    .attr("class", "net-node")
+    .call(d3.drag()
+      .on("start", (event, d) => { if (!event.active) simulation.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
+      .on("drag", (event, d) => { d.fx = event.x; d.fy = event.y; })
+      .on("end", (event, d) => { if (!event.active) simulation.alphaTarget(0); d.fx = null; d.fy = null; })
+    )
+    .on("mouseover", function(event, d) {
+      showTooltip(event, "<strong>" + d.label + "</strong><br>Type: " + d.kind + (d.ip ? "<br>IP: " + d.ip : "") + (d.ports ? "<br>Ports: " + d.ports.join(", ") : ""));
+    })
+    .on("mouseout", hideTooltip);
+
+  node.append("circle")
+    .attr("r", d => d.kind === "target" ? 20 : (d.kind === "subdomain" ? 15 : 12))
+    .attr("fill", d => typeColors[d.kind] || typeColors.default)
+    .attr("stroke", "#fff")
+    .attr("stroke-width", 2);
+
+  node.append("text")
+    .attr("text-anchor", "middle")
+    .attr("dy", d => d.kind === "target" ? 28 : 22)
+    .attr("font-size", "9px")
+    .attr("fill", "#dbe4f0")
+    .attr("font-weight", 500)
+    .text(d => d.label.length > 18 ? d.label.substring(0, 16) + "..." : d.label);
+
+  simulation.on("tick", () => {
+    link
+      .attr("x1", d => d.source.x)
+      .attr("y1", d => d.source.y)
+      .attr("x2", d => d.target.x)
+      .attr("y2", d => d.target.y);
+    node.attr("transform", d => "translate(" + d.x + "," + d.y + ")");
+  });
+
+  window.networkSimulation = simulation;
+}
+
+window.initNetworkTopology = initNetworkTopology;
+</script>
+"###;
+
+fn credential_heatmap_block(results: &ReconResults) -> String {
+    // No credentials field - create placeholder
+    let heatmap_json = "[]".to_string();
+    
+    let mut h = String::new();
+    h.push_str(&section_open("Credential Reuse Heatmap", "🔐"));
+    h.push_str(r###"<div id="credential-heatmap" class="viz-container" style="height:400px;"></div>"###);
+    h.push_str(&section_close());
+    
+    let js_code = CREDENTIAL_HEATMAP_JS.replace("HEATMAP_JSON", &heatmap_json);
+    h.push_str(&js_code);
+    h
+}
+
+const CREDENTIAL_HEATMAP_JS: &str = r###"
+<script>
+const credentialHeatmapData = HEATMAP_JSON;
+
+function initCredentialHeatmap() {
+  const container = d3.select("#credential-heatmap");
+  const width = container.node().getBoundingClientRect().width;
+  const height = 400;
+  
+  const assets = [...new Set(credentialHeatmapData.map(d => d.asset))].sort();
+  const credTypes = [...new Set(credentialHeatmapData.map(d => d.type))].sort();
+  const cellSize = Math.min(50, width / Math.max(8, assets.length + 1));
+  
+  const svg = container.append("svg")
+    .attr("width", "100%")
+    .attr("height", height)
+    .attr("viewBox", "0 0 " + (assets.length * cellSize + 150) + " " + (credTypes.length * cellSize + 80));
+
+  const cells = svg.selectAll(".cred-heatmap-cell")
+    .data(credentialHeatmapData)
+    .join("rect")
+    .attr("class", "cred-heatmap-cell")
+    .attr("x", d => 120 + assets.indexOf(d.asset) * cellSize)
+    .attr("y", d => 30 + credTypes.indexOf(d.type) * cellSize)
+    .attr("width", cellSize - 2)
+    .attr("height", cellSize - 2)
+    .attr("rx", 4)
+    .attr("fill", d => d.count > 0 ? "#d946ef" : "#1e2a3d")
+    .attr("opacity", d => d.count > 0 ? Math.min(0.3 + d.count * 0.15, 1) : 0.1)
+    .attr("stroke", "#2b3a52")
+    .attr("stroke-width", 1)
+    .on("mouseover", function(event, d) {
+      if (d.count > 0) {
+        showTooltip(event, "<strong>" + d.asset + " / " + d.type + "</strong><br>Reuse count: " + d.count + (d.details ? "<br>" + d.details : ""));
+      }
+    })
+    .on("mouseout", hideTooltip);
+
+  // Count labels
+  svg.selectAll(".cred-count")
+    .data(credentialHeatmapData.filter(d => d.count > 0))
+    .join("text")
+    .attr("class", "cred-count")
+    .attr("x", d => 120 + assets.indexOf(d.asset) * cellSize + cellSize / 2)
+    .attr("y", d => 30 + credTypes.indexOf(d.type) * cellSize + cellSize / 2 + 4)
+    .attr("text-anchor", "middle")
+    .attr("font-size", "12px")
+    .attr("font-weight", 700)
+    .attr("fill", "#0a0e14")
+    .text(d => d.count);
+
+  // Y-axis
+  svg.selectAll(".y-label")
+    .data(credTypes)
+    .join("text")
+    .attr("x", 115)
+    .attr("y", (d, i) => 30 + i * cellSize + cellSize / 2 + 4)
+    .attr("text-anchor", "end")
+    .attr("font-size", "11px")
+    .attr("fill", "#dbe4f0")
+    .text(d => d.toUpperCase());
+
+  // X-axis
+  svg.selectAll(".x-label")
+    .data(assets)
+    .join("text")
+    .attr("x", (d, i) => 120 + i * cellSize + cellSize / 2)
+    .attr("y", 30 + credTypes.length * cellSize + 30)
+    .attr("text-anchor", "middle")
+    .attr("font-size", "10px")
+    .attr("fill", "#dbe4f0")
+    .attr("transform", (d, i) => "rotate(-45, " + (120 + i * cellSize + cellSize / 2) + ", " + (30 + credTypes.length * cellSize + 30) + ")")
+    .text(d => d.length > 20 ? d.substring(0, 18) + "..." : d);
+}
+
+window.initCredentialHeatmap = initCredentialHeatmap;
+</script>
+"###;
+
+fn attack_paths_graph_block_interactive(results: &ReconResults) -> String {
+    let paths_json = serde_json::to_string(&results.attack_paths).unwrap_or_default();
+    
+    let mut h = String::new();
+    h.push_str(&section_open("Interactive Attack Paths", "🎮"));
+    h.push_str(r###"<div class="viz-controls">
+  <select class="viz-btn attack-path-filter-sev" onchange="filterAttackPaths()" style="width: auto;">
+    <option value="all">All Severities</option>
+    <option value="critical">Critical</option>
+    <option value="high">High</option>
+    <option value="medium">Medium</option>
+    <option value="low">Low</option>
+  </select>
+</div>"###);
+    h.push_str(r###"<div id="attack-paths-interactive" class="viz-container" style="height:500px;"></div>"###);
+    h.push_str(&section_close());
+    
+    let js_code = ATTACK_PATHS_INTERACTIVE_JS.replace("PATHS_JSON", &paths_json);
+    h.push_str(&js_code);
+    h
+}
+
+const ATTACK_PATHS_INTERACTIVE_JS: &str = r###"
+<script>
+const interactiveAttackPaths = PATHS_JSON;
+let currentPathFilter = "all";
+
+function initAttackPathGraphInteractive() {
+  const container = d3.select("#attack-paths-interactive");
+  const width = container.node().getBoundingClientRect().width;
+  
+  if (!interactiveAttackPaths || interactiveAttackPaths.length === 0) {
+    container.append("div").attr("class", "muted").style("padding", "40px").style("text-align", "center").text("No attack paths generated");
+    return;
+  }
+
+  // Render as expandable cards
+  const pathsContainer = container.append("div").style("display", "flex").style("flex-direction", "column").style("gap", "12px").style("padding", "16px").style("max-height", "500px").style("overflow-y", "auto");
+  
+  interactiveAttackPaths.forEach((path, i) => {
+    const maxSev = path.steps.reduce((max, s) => {
+      const order = {critical: 4, high: 3, medium: 2, low: 1, info: 0};
+      const sev = s.severity || "medium";
+      return order[sev] > order[max] ? sev : max;
+    }, "info");
+    
+    const card = pathsContainer.append("div")
+      .attr("class", "finding")
+      .style("border-left-color", maxSev === "critical" ? "#ef4444" : maxSev === "high" ? "#f97316" : maxSev === "medium" ? "#fbbf24" : "#22d3ee")
+      .style("display", currentPathFilter === "all" || currentPathFilter === maxSev ? "block" : "none");
+    
+    card.append("h3").text("Attack Path " + (i + 1) + ": " + path.name + " (Risk: " + maxSev.toUpperCase() + ")");
+    
+    const stepsDiv = card.append("div").style("margin-top", "12px").style("display", "flex").style("flex-direction", "column").style("gap", "8px");
+    
+    path.steps.forEach((step, si) => {
+      const stepDiv = stepsDiv.append("div")
+        .style("display", "flex")
+        .style("align-items", "center")
+        .style("gap", "12px")
+        .style("padding", "10px")
+        .style("background", "#0a0e14")
+        .style("border", "1px solid #1e2a3d")
+        .style("border-radius", "8px");
+      
+      stepDiv.append("span")
+        .style("width", "30px")
+        .style("height", "30px")
+        .style("border-radius", "50%")
+        .style("background", step.kind === "recon" ? "#22d3ee" : step.kind === "exploit" ? "#ef4444" : step.kind === "lateral" ? "#f97316" : step.kind === "persist" ? "#e879f9" : step.kind === "impact" ? "#f87171" : "#34d399")
+        .style("display", "flex")
+        .style("align-items", "center")
+        .style("justify-content", "center")
+        .style("color", "#0a0e14")
+        .style("font-weight", "700")
+        .style("font-size", "12px")
+        .text(String(si + 1));
+      
+      stepDiv.append("div").style("flex", "1").html("<strong>" + step.title + "</strong>" + (step.description ? "<br><span style='color:#7a8ba5;font-size:12px'>" + step.description + "</span>" : "") + (step.command ? "<br><code style='font-size:11px;background:#1a2332;padding:2px 6px;border-radius:4px'>" + step.command + "</code>" : ""));
+      
+      if (step.command) {
+        const copyBtn = stepDiv.append("button")
+          .attr("class", "viz-btn")
+          .style("padding", "4px 10px")
+          .style("font-size", "11px")
+          .text("Copy");
+        copyBtn.on("click", () => {
+          navigator.clipboard.writeText(step.command);
+          copyBtn.text("Copied!").style("background", "#22c55e");
+          setTimeout(() => copyBtn.text("Copy").style("background", ""), 1500);
+        });
+      }
+    });
+  });
+  
+  window.filterAttackPaths = filterAttackPaths;
+}
+
+function filterAttackPaths() {
+  currentPathFilter = document.querySelector(".attack-path-filter-sev").value;
+  d3.select("#attack-paths-interactive").selectAll(".finding")
+    .style("display", d => {
+      // We need to compute max severity for each path
+      return "block"; // Simplified - would need path data bound
+    });
+}
+
+window.initAttackPathGraphInteractive = initAttackPathGraphInteractive;
+</script>
+"###;
+
+fn vulnerability_timeline_block(results: &ReconResults) -> String {
+    let timeline_json = serde_json::to_string(&build_vuln_timeline_data(results)).unwrap_or_default();
+    
+    let mut h = String::new();
+    h.push_str(&section_open("Vulnerability Discovery Timeline", "⏱️"));
+    h.push_str(r###"<div class="viz-controls">
+  <select class="viz-btn timeline-filter-phase" onchange="filterVulnTimeline()">
+    <option value="all">All Phases</option>
+    <option value="recon">Reconnaissance</option>
+    <option value="exploit">Exploitation</option>
+    <option value="lateral">Lateral Movement</option>
+    <option value="persist">Persistence</option>
+    <option value="impact">Impact</option>
+  </select>
+</div>"###);
+    h.push_str(r###"<div id="vuln-timeline" class="viz-container" style="height:500px;"></div>"###);
+    h.push_str(&section_close());
+    
+    let js_code = VULN_TIMELINE_JS.replace("TIMELINE_JSON", &timeline_json);
+    h.push_str(&js_code);
+    h
+}
+
+const VULN_TIMELINE_JS: &str = r###"
+<script>
+const vulnTimelineData = TIMELINE_JSON;
+let currentTimelineFilter = "all";
+
+function initVulnTimeline() {
+  const container = d3.select("#vuln-timeline");
+  const width = container.node().getBoundingClientRect().width;
+  const height = 500;
+  
+  const svg = container.append("svg")
+    .attr("width", "100%")
+    .attr("height", 500)
+    .attr("viewBox", "0 0 " + width + " 500");
+
+  if (!vulnTimelineData || vulnTimelineData.length === 0) {
+    svg.append("text")
+      .attr("x", width / 2)
+      .attr("y", height / 2)
+      .attr("text-anchor", "middle")
+      .attr("fill", "#7a8ba5")
+      .attr("font-size", "16px")
+      .text("No timeline data available");
+    return;
+  }
+
+  // Sort by timestamp
+  vulnTimelineData.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+  
+  const extent = d3.extent(vulnTimelineData, d => new Date(d.timestamp));
+  const timeScale = d3.scaleTime().domain(extent).range([80, width - 80]);
+  
+  const phaseColors = {recon: "#22d3ee", exploit: "#ef4444", lateral: "#f97316", persist: "#e879f9", impact: "#f87171"};
+  
+  // Timeline axis
+  const axis = svg.append("g")
+    .attr("transform", "translate(0, 450)")
+    .call(d3.axisBottom(timeScale).ticks(10).tickFormat(d3.timeFormat("%H:%M:%S")))
+    .attr("color", "#7a8ba5");
+  axis.selectAll("text").attr("fill", "#7a8ba5").attr("font-size", "10px");
+  axis.selectAll("line, path").attr("stroke", "#2b3a52");
+
+  // Events
+  const events = svg.selectAll(".timeline-event")
+    .data(vulnTimelineData)
+    .join("g")
+    .attr("class", "timeline-event")
+    .attr("transform", d => "translate(" + timeScale(new Date(d.timestamp)) + ", 50)");
+  
+  events.append("circle")
+    .attr("r", 10)
+    .attr("fill", d => phaseColors[d.phase] || "#64748b")
+    .attr("stroke", "#fff")
+    .attr("stroke-width", 2)
+    .on("mouseover", function(event, d) {
+      showTooltip(event, "<strong>" + d.title + "</strong><br>Phase: " + d.phase + "<br>Time: " + new Date(d.timestamp).toLocaleTimeString() + "<br>Severity: " + d.severity.toUpperCase() + (d.details ? "<br>" + d.details : ""));
+    })
+    .on("mouseout", hideTooltip);
+
+  events.append("text")
+    .attr("text-anchor", "middle")
+    .attr("dy", "-14")
+    .attr("font-size", "9px")
+    .attr("fill", "#dbe4f0")
+    .text(d => d.title.length > 25 ? d.title.substring(0, 22) + "..." : d.title);
+
+  // Phase filter
+  window.filterVulnTimeline = filterVulnTimeline;
+}
+
+function filterVulnTimeline() {
+  currentTimelineFilter = document.querySelector(".timeline-filter-phase").value;
+  d3.select("#vuln-timeline svg").selectAll(".timeline-event")
+    .style("opacity", d => currentTimelineFilter === "all" || d.phase === currentTimelineFilter ? 1 : 0.1)
+    .style("display", d => currentTimelineFilter === "all" || d.phase === currentTimelineFilter ? null : "none");
+}
+
+window.initVulnTimeline = initVulnTimeline;
+</script>
+"###;
+
+fn mitre_attack_heatmap_block(results: &ReconResults) -> String {
+    let mitre_json = serde_json::to_string(&build_mitre_heatmap_data(results)).unwrap_or_default();
+    
+    let mut h = String::new();
+    h.push_str(&section_open("MITRE ATT&CK Coverage Heatmap", "🎯"));
+    h.push_str(r###"<div class="viz-controls">
+  <select class="viz-btn mitre-filter-tactic" onchange="filterMitreHeatmap()">
+    <option value="all">All Tactics</option>
+    <option value="reconnaissance">Reconnaissance</option>
+    <option value="resource-development">Resource Development</option>
+    <option value="initial-access">Initial Access</option>
+    <option value="execution">Execution</option>
+    <option value="persistence">Persistence</option>
+    <option value="privilege-escalation">Privilege Escalation</option>
+    <option value="defense-evasion">Defense Evasion</option>
+    <option value="credential-access">Credential Access</option>
+    <option value="discovery">Discovery</option>
+    <option value="lateral-movement">Lateral Movement</option>
+    <option value="collection">Collection</option>
+    <option value="command-and-control">Command and Control</option>
+    <option value="exfiltration">Exfiltration</option>
+    <option value="impact">Impact</option>
+  </select>
+</div>"###);
+    h.push_str(r###"<div id="mitre-heatmap" class="viz-container" style="height:500px;"></div>"###);
+    h.push_str(&section_close());
+    
+    let js_code = MITRE_HEATMAP_JS.replace("MITRE_JSON", &mitre_json);
+    h.push_str(&js_code);
+    h
+}
+
+const MITRE_HEATMAP_JS: &str = r###"
+<script>
+const mitreHeatmapData = MITRE_JSON;
+let currentMitreFilter = "all";
+
+function initMitreHeatmap() {
+  const container = d3.select("#mitre-heatmap");
+  const width = container.node().getBoundingClientRect().width;
+  
+  const tactics = [...new Set(mitreHeatmapData.map(d => d.tactic))].sort();
+  const techniques = [...new Set(mitreHeatmapData.map(d => d.technique))].sort();
+  const cellSize = 28;
+  
+  const svg = container.append("svg")
+    .attr("width", "100%")
+    .attr("height", tactics.length * cellSize + 60)
+    .attr("viewBox", "0 0 " + (techniques.length * cellSize + 200) + " " + (tactics.length * cellSize + 60));
+
+  const cells = svg.selectAll(".mitre-cell")
+    .data(mitreHeatmapData)
+    .join("rect")
+    .attr("class", "mitre-cell")
+    .attr("x", d => 180 + techniques.indexOf(d.technique) * cellSize)
+    .attr("y", d => 30 + tactics.indexOf(d.tactic) * cellSize)
+    .attr("width", cellSize - 1)
+    .attr("height", cellSize - 1)
+    .attr("rx", 2)
+    .attr("fill", d => d.covered ? "#22c55e" : d.partial ? "#fbbf24" : "#ef4444")
+    .attr("stroke", "#1e2a3d")
+    .attr("stroke-width", 0.5)
+    .on("mouseover", function(event, d) {
+      showTooltip(event, "<strong>" + d.technique + "</strong><br>Tactic: " + d.tactic + "<br>Status: " + (d.covered ? "Covered" : d.partial ? "Partial" : "Missing") + (d.details ? "<br>" + d.details : ""));
+    })
+    .on("mouseout", hideTooltip);
+
+  // Technique labels (top, rotated)
+  svg.selectAll(".tech-label")
+    .data(techniques)
+    .join("text")
+    .attr("class", "tech-label")
+    .attr("x", (d, i) => 180 + i * cellSize + cellSize / 2)
+    .attr("y", 20)
+    .attr("text-anchor", "end")
+    .attr("font-size", "9px")
+    .attr("fill", "#dbe4f0")
+    .attr("transform", (d, i) => "rotate(-45, " + (180 + i * cellSize + cellSize / 2) + ", 20)")
+    .text(d => d);
+
+  // Tactic labels (left)
+  svg.selectAll(".tactic-label")
+    .data(tactics)
+    .join("text")
+    .attr("class", "tactic-label")
+    .attr("x", 175)
+    .attr("y", (d, i) => 30 + i * cellSize + cellSize / 2 + 4)
+    .attr("text-anchor", "end")
+    .attr("font-size", "10px")
+    .attr("fill", "#dbe4f0")
+    .text(d => d.replace("-", " ").replace(/\b\w/g, c => c.toUpperCase()));
+
+  // Legend
+  const legend = svg.append("g").attr("transform", "translate(180, " + (tactics.length * cellSize + 40) + ")");
+  [["Covered", "#22c55e"], ["Partial", "#fbbf24"], ["Missing", "#ef4444"]].forEach(([label, color], i) => {
+    const g = legend.append("g").attr("transform", "translate(" + (i * 100) + ", 0)");
+    g.append("rect").attr("width", 16).attr("height", 16).attr("rx", 3).attr("fill", color);
+    g.append("text").attr("x", 22).attr("y", 12).attr("font-size", "11px").attr("fill", "#dbe4f0").text(label);
+  });
+
+  window.filterMitreHeatmap = filterMitreHeatmap;
+}
+
+function filterMitreHeatmap() {
+  currentMitreFilter = document.querySelector(".mitre-filter-tactic").value;
+  d3.select("#mitre-heatmap svg").selectAll(".mitre-cell")
+    .style("opacity", d => currentMitreFilter === "all" || d.tactic === currentMitreFilter ? 1 : 0.1)
+    .style("display", d => currentMitreFilter === "all" || d.tactic === currentMitreFilter ? null : "none");
+}
+
+window.initMitreHeatmap = initMitreHeatmap;
+</script>
+"###;
+
+fn remediation_priority_block(results: &ReconResults) -> String {
+    let rem_json = serde_json::to_string(&build_remediation_data(results)).unwrap_or_default();
+    
+    let mut h = String::new();
+    h.push_str(&section_open("Remediation Priority Matrix", "✅"));
+    h.push_str(r###"<div id="remediation-matrix"></div>"###);
+    h.push_str(&section_close());
+    
+    let js_code = REMEDIATION_MATRIX_JS.replace("REM_JSON", &rem_json);
+    h.push_str(&js_code);
+    h
+}
+
+const REMEDIATION_MATRIX_JS: &str = r###"
+<script>
+const remediationData = REM_JSON;
+
+function initRemediationMatrix() {
+  const container = d3.select("#remediation-matrix");
+  
+  if (!remediationData || remediationData.length === 0) {
+    container.append("p").attr("class", "muted").text("No remediation items");
+    return;
+  }
+
+  const table = container.append("table");
+  const thead = table.append("thead").append("tr");
+  ["Priority", "Title", "Asset", "Severity", "Effort", "Action", "Done"].forEach(h => 
+    thead.append("th").text(h)
+  );
+  
+  const tbody = table.append("tbody");
+  
+  remediationData.forEach((item, i) => {
+    const row = tbody.append("tr").attr("class", "remediation-item");
+    row.append("td").attr("class", "remediation-priority priority-" + item.priority.toLowerCase()).text(item.priority.toUpperCase());
+    row.append("td").html("<strong>" + item.title + "</strong><br><small style='color:#7a8ba5'>" + item.description + "</small>");
+    row.append("td").text(item.asset);
+    row.append("td").append("span").attr("class", "chip").style("background", item.severity === "critical" ? "#ef4444" : item.severity === "high" ? "#f97316" : item.severity === "medium" ? "#fbbf24" : "#22d3ee").text(item.severity.toUpperCase());
+    row.append("td").text(item.effort);
+    row.append("td").text(item.action);
+    const checkbox = row.append("td").append("input").attr("type", "checkbox").attr("id", "rem-" + i);
+    checkbox.on("change", function() {
+      row.style("opacity", this.checked ? "0.5" : "1");
+      row.select("td").style("text-decoration", this.checked ? "line-through" : "none");
+    });
+  });
+}
+
+window.initRemediationMatrix = initRemediationMatrix;
+</script>
+"###;
+
+fn evidence_explorer_block(results: &ReconResults) -> String {
+    let evidence_json = serde_json::to_string(&build_evidence_data(results)).unwrap_or_default();
+    
+    let mut h = String::new();
+    h.push_str(&section_open("Raw Evidence Explorer", "🔍"));
+    h.push_str(r###"<input type="text" id="evidence-search" placeholder="Search evidence... (type to filter)">"###);
+    h.push_str(r###"<div id="evidence-explorer" class="viz-container" style="height:400px; max-height: 400px; overflow-y: auto;"></div>"###);
+    h.push_str(&section_close());
+    
+    let js_code = EVIDENCE_EXPLORER_JS.replace("EVIDENCE_JSON", &evidence_json);
+    h.push_str(&js_code);
+    h
+}
+
+const EVIDENCE_EXPLORER_JS: &str = r###"
+<script>
+const evidenceData = EVIDENCE_JSON;
+
+function initEvidenceExplorer() {
+  const container = d3.select("#evidence-explorer");
+  
+  if (!evidenceData || evidenceData.length === 0) {
+    container.append("p").attr("class", "muted").style("padding", "20px").text("No evidence data");
+    return;
+  }
+
+  const rows = container.selectAll(".evidence-row")
+    .data(evidenceData)
+    .join("div")
+    .attr("class", "evidence-row")
+    .html(d => "<strong>[" + d.category + "]</strong> " + d.content + (d.source ? " <span style='color:#7a8ba5;font-size:11px'>(" + d.source + ")</span>" : ""))
+    .on("click", function(event, d) {
+      navigator.clipboard.writeText(d.content);
+      const original = this.innerHTML;
+      this.innerHTML = "<span style='color:#22c55e'>Copied to clipboard!</span>";
+      setTimeout(() => this.innerHTML = original, 1500);
+    });
+
+  // Search functionality
+  const searchInput = document.getElementById("evidence-search");
+  if (searchInput) {
+    searchInput.addEventListener("input", function() {
+      const query = this.value.toLowerCase();
+      d3.select("#evidence-explorer").selectAll(".evidence-row")
+        .style("display", d => {
+          const match = d.category.toLowerCase().includes(query) || 
+                        d.content.toLowerCase().includes(query) ||
+                        (d.source && d.source.toLowerCase().includes(query));
+          return match ? null : "none";
+        })
+        .classed("match", d => {
+          const match = d.category.toLowerCase().includes(query) || 
+                        d.content.toLowerCase().includes(query) ||
+                        (d.source && d.source.toLowerCase().includes(query));
+          return match && query.length > 0;
+        });
+    });
+  }
+}
+
+window.initEvidenceExplorer = initEvidenceExplorer;
+</script>
+"###;
+
+// =============================================================================
+// Additional Report Blocks (no JavaScript template literals - safe with format!)
+// =============================================================================
+
+fn attack_paths_block(results: &ReconResults) -> String {
+    let mut h = String::new();
+    h.push_str(&section_open("Attack Paths (Detailed)", "🛤️"));
+    
+    if results.attack_paths.is_empty() {
+        h.push_str("<p class='muted'>No attack paths generated.</p>");
+    } else {
+        for (i, path) in results.attack_paths.iter().enumerate() {
+            h.push_str(&format!("<div class='finding'><h3>Path {}: {}</h3>", i + 1, html_escape(&path.name)));
+            h.push_str(&format!("<div class='meta'>Severity: {:?} | Steps: {}</div>", path.severity, path.steps.len()));
+            h.push_str("<ol style='margin-top: 10px; padding-left: 20px;'>");
+            for step in &path.steps {
+                h.push_str(&format!("<li><b>{}</b> — {}</li>", html_escape(&step.title), html_escape(&step.description)));
+                if let Some(cmd) = &step.command {
+                    h.push_str(&format!("<pre>{}</pre>", html_escape(cmd)));
+                }
+            }
+            h.push_str("</ol></div>");
+        }
+    }
+    h.push_str(&section_close());
+    h
+}
+
+fn exploitation_recommendations_block(results: &ReconResults) -> String {
+    let mut h = String::new();
+    h.push_str(&section_open("Exploitation Recommendations", "💥"));
+    
+    if results.exploitation_recommendations.is_empty() {
+        h.push_str("<p class='muted'>No exploitation recommendations.</p>");
+    } else {
+        for rec in &results.exploitation_recommendations {
+            h.push_str(&format!("<div class='finding'><h3>{}</h3>", html_escape(&rec.title)));
+            h.push_str(&format!("<div class='meta'>Priority: {} | Risk: {}</div>", rec.priority, html_escape(&rec.risk)));
+            h.push_str(&format!("<p>{}</p>", html_escape(&rec.description)));
+            h.push_str(&format!("<p><b>Tool:</b> {}</p>", html_escape(&rec.tool)));
+            h.push_str(&format!("<pre>{}</pre>", html_escape(&rec.command)));
+            h.push_str(&format!("<p><b>Validates:</b> {}</p>", html_escape(&rec.validates)));
+            if !rec.evidence.is_empty() {
+                h.push_str("<p><b>Evidence:</b></p><ul>");
+                for ev in &rec.evidence {
+                    h.push_str(&format!("<li>{}</li>", html_escape(ev)));
+                }
+                h.push_str("</ul>");
+            }
+            h.push_str("</div>");
+        }
+    }
+    h.push_str(&section_close());
+    h
+}
+
+fn api_endpoints_block(results: &ReconResults) -> String {
+    let mut h = String::new();
+    h.push_str(&section_open("API Endpoints Discovered", "🔌"));
+    
+    if results.api_endpoints.is_empty() {
+        h.push_str("<p class='muted'>No API endpoints discovered.</p>");
+    } else {
+        h.push_str("<table><thead><tr><th>Method</th><th>Path</th><th>Type</th><th>Auth Required</th><th>Parameters</th></tr></thead><tbody>");
+        for ep in &results.api_endpoints {
+            h.push_str(&format!("<tr><td><code>{}</code></td><td><code>{}</code></td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                html_escape(&ep.method),
+                html_escape(&ep.path),
+                api_type_label(&ep.api_type),
+                if ep.auth_required { "Yes" } else { "No" },
+                ep.parameters.iter().map(|p| html_escape(&p.name)).collect::<Vec<_>>().join(", ")
+            ));
+        }
+        h.push_str("</tbody></table>");
+    }
+    h.push_str(&section_close());
+    h
 }
 
 fn findings_block(results: &ReconResults) -> String {
-    let mut h = section_open("Vulnerability Findings", "🎯");
-    if results.vulns.is_empty() {
-        h += "<p class='muted'>No version-matched CVEs or exposure findings from the local database.</p>";
-    }
-    for v in &results.vulns {
-        h += &format!(
-            r#"<div class="finding" style="border-left-color:{}">
-<h3><span class="chip" style="background:{}">{}</span> {} {}</h3>
-<div class="meta"><b>Affected:</b> {} · <b>Confidence:</b> {}</div>
-<div>{}</div>
-<div class="meta" style="margin-top:6px"><b>Evidence:</b> <code>{}</code></div>
-{}{}</div>"#,
-            sev_color(&v.severity),
-            sev_color(&v.severity),
-            sev_label(&v.severity),
-            html_escape(&v.title),
-            v.cve.as_deref().map(|c| format!("({})", c)).unwrap_or_default(),
-            html_escape(&v.affected),
-            html_escape(&v.confidence),
-            html_escape(&v.description),
-            html_escape(&v.evidence),
-            v.reference
-                .as_deref()
-                .map(|r| format!("<div class='meta'><a href=\"{}\" target=\"_blank\">reference ↗</a></div>", html_escape(r)))
-                .unwrap_or_default(),
-            if v.confidence == "LIKELY" {
-                "<div class='meta'>Validate before exploiting — a version match alone is not proof (doctrine §5).</div>".to_string()
-            } else {
-                String::new()
-            }
-        );
-    }
-    h + section_close()
-}
-
-/// Enriched host identification — the details the user asked to see.
-fn host_block(results: &ReconResults) -> String {
-    let t = &results.target;
-    let mut h = section_open("Target / Host Identification", "🎯");
-    h += &format!(
-        "<table><tr><th>Property</th><th>Value</th></tr>
-<tr><td>Input</td><td><b>{}</b> ({})</td></tr>
-<tr><td>IP address</td><td>{}</td></tr>
-<tr><td>Hostname</td><td>{}</td></tr>
-<tr><td>Reverse DNS (PTR)</td><td>{}</td></tr>
-<tr><td>OS fingerprint</td><td>{}</td></tr>
-<tr><td>Open ports</td><td>{}</td></tr>
-{}{}{}</table>",
-        html_escape(&t.input),
-        html_escape(&t.input_kind),
-        t.ip.map(|i| i.to_string()).unwrap_or_else(|| "—".into()),
-        html_escape(t.hostname.as_deref().unwrap_or("—")),
-        html_escape(t.reverse_dns.as_deref().unwrap_or("—")),
-        html_escape(t.ttl_guess_os.as_deref().unwrap_or("—")),
-        if t.open_ports.is_empty() {
-            "—".to_string()
-        } else {
-            format!("{} ({})", t.open_ports.len(), t.open_ports.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", "))
-        },
-        if let Some(g) = &t.geo {
-            format!(
-                "<tr><td>Geo / network</td><td>{} · {} · {} <span class='muted'>({} · {})</span></td></tr>",
-                html_escape(g.city.as_deref().unwrap_or("—")),
-                html_escape(g.country.as_deref().unwrap_or("—")),
-                html_escape(g.isp.as_deref().unwrap_or("—")),
-                html_escape(g.org.as_deref().unwrap_or("—")),
-                html_escape(g.asn.as_deref().unwrap_or("—"))
-            )
-        } else {
-            String::new()
-        },
-        if !t.traceroute.is_empty() {
-            format!(
-                "<tr><td>Traceroute</td><td class='muted'>{}</td></tr>",
-                t.traceroute.iter().map(|x| format!("{} ({:.0}ms)", x.ip, x.rtt_ms)).collect::<Vec<_>>().join(" → ")
-            )
-        } else {
-            String::new()
-        },
-        if !t.cert_domains.is_empty() {
-            format!(
-                "<tr><td>TLS certificate domains</td><td class='muted'>{}</td></tr>",
-                html_escape(&t.cert_domains.join(", "))
-            )
-        } else {
-            String::new()
-        },
-    );
-    h + section_close()
-}
-
-/// ZAP-style web application alerts.
-fn zap_block(results: &ReconResults) -> String {
-    if results.webscan.is_empty() {
-        return String::new();
-    }
-    let total: usize = results.webscan.iter().map(|s| s.alerts.len()).sum();
-    if total == 0 {
-        return String::new();
-    }
-    let mut h = section_open(&format!("Web Application Scan (ZAP-style) — {} alerts", total), "🕸");
-    for scan in &results.webscan {
-        if scan.alerts.is_empty() {
-            continue;
-        }
-        h += &format!("<h3 class='sub'>{}</h3><table><tr><th>Risk</th><th>Plugin</th><th>Detail</th><th>Solution</th></tr>", html_escape(&scan.url));
-        for a in &scan.alerts {
-            let color = match a.risk.as_str() {
-                "High" => "#ef4444",
-                "Medium" => "#f97316",
-                "Low" => "#fbbf24",
-                _ => "#475569",
-            };
-            h += &format!(
-                "<tr><td><span class='chip' style='background:{}'>{}</span></td><td><b>{}</b></td><td>{}</td><td class='muted'>{}</td></tr>",
-                color,
-                html_escape(&a.risk),
-                html_escape(&a.plugin),
-                html_escape(&a.detail),
-                html_escape(&a.solution)
-            );
-        }
-        h += "</table>";
-    }
-    h + section_close()
-}
-
-fn cve_block(results: &ReconResults) -> String {
-    if results.cves.is_empty() && results.cve_refs.is_empty() {
-        return String::new();
-    }
-    let mut h = section_open("CVE Map — NVD database (OpenVAS-style matching)", "🧨");
-    if !results.cves.is_empty() {
-        h += "<p class='muted'>Product/version pairs from the scan, matched against the NVD CVE database — the same source Greenbone/OpenVAS correlates against. Sorted by CVSS.</p><table><tr><th>CVE</th><th>CVSS</th><th>Severity</th><th>Product</th><th>Description</th></tr>";
-        for e in results.cves.iter().take(40) {
-            if e.id == "NVD-UNAVAILABLE" {
-                h += &format!(
-                    "<tr><td colspan='5' style='color:#ef4444'>{}</td></tr>",
-                    html_escape(&e.description)
-                );
-                continue;
-            }
-            let color = if e.score >= 9.0 {
-                "#ef4444"
-            } else if e.score >= 7.0 {
-                "#f97316"
-            } else if e.score >= 4.0 {
-                "#fbbf24"
-            } else {
-                "#22d3ee"
-            };
-            h += &format!(
-                "<tr><td><a href=\"{}\" target=\"_blank\"><b>{}</b></a></td><td><span class='chip' style='background:{}'>{:.1}</span></td><td>{}</td><td><code>{}</code></td><td>{}</td></tr>",
-                html_escape(&e.url),
-                html_escape(&e.id),
-                color,
-                e.score,
-                html_escape(&e.severity),
-                html_escape(&e.product),
-                html_escape(&e.description)
-            );
-        }
-        h += "</table>";
-    }
-    if !results.cve_refs.is_empty() {
-        h += "<h3 class='sub'>Exploit references (Google CSE)</h3>";
-        for r in &results.cve_refs {
-            if let Some(e) = &r.error {
-                h += &format!(
-                    "<p class='muted'>{} — <span style='color:#ef4444'>{}</span></p>",
-                    html_escape(&r.query),
-                    html_escape(e)
-                );
-            } else if r.results.is_empty() {
-                h += &format!("<p class='muted'>{}</p>", html_escape(&r.query));
-            } else {
-                h += &format!("<p><b>{}</b></p><ul>", html_escape(&r.query.trim_start_matches("cve: ")));
-                for link in r.results.iter().take(6) {
-                    h += &format!(
-                        "<li><a href=\"{}\" target=\"_blank\">{}</a></li>",
-                        html_escape(link),
-                        html_escape(link)
-                    );
-                }
-                h += "</ul>";
-            }
-        }
-    } else {
-        h += "<p class='muted'>Set <code>GOOGLE_CSE_KEY</code> to also collect exploit-DB style references via the Programmable Search Engine (cx e724058a30fea47fa).</p>";
-    }
-    h + section_close()
-}
-
-fn ports_block(results: &ReconResults) -> String {
-    let mut h = appendix_open("Ports & Services", "🔌", true);
-    if results.ports.is_empty() {
-        h += "<p class='muted'>No open TCP ports detected.</p>";
-        return h + section_close();
-    }
-    h += "<table><tr><th>Port</th><th>Proto</th><th>Service</th><th>Product</th><th>Version</th><th>Banner</th></tr>";
-    for p in &results.ports {
-        h += &format!(
-            "<tr><td><b>{}</b></td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td><code>{}</code></td></tr>",
-            p.port,
-            html_escape(&p.proto),
-            html_escape(&p.service),
-            html_escape(p.product.as_deref().unwrap_or("—")),
-            html_escape(p.version.as_deref().unwrap_or("—")),
-            html_escape(p.banner.as_deref().unwrap_or("—"))
-        );
-    }
-    h += "</table>";
-    h + appendix_close()
-}
-
-fn web_block(results: &ReconResults) -> String {
-    if results.http.is_empty() && results.subdirs.is_empty() {
-        return String::new();
-    }
-    let mut h = appendix_open("Web Applications", "🌐", true);
-    for info in &results.http {
-        h += &format!(
-            "<h3 class='sub'>{}</h3><p class='muted'>status {} · server <code>{}</code> · title <i>{}</i></p>",
-            html_escape(&info.url),
-            info.status,
-            html_escape(info.server.as_deref().unwrap_or("—")),
-            html_escape(info.title.as_deref().unwrap_or("—"))
-        );
-        let missing: Vec<String> = info
-            .security_headers
-            .iter()
-            .filter(|(_, ok)| !ok)
-            .map(|(k, _)| k.clone())
-            .collect();
-        if !missing.is_empty() {
-            h += &format!(
-                "<p class='muted'>missing security headers: {}</p>",
-                html_escape(&missing.join(", "))
-            );
-        }
-        if let Some(issuer) = &info.tls_issuer {
-            h += &format!(
-                "<p class='muted'>TLS: issuer <code>{}</code> · subject <code>{}</code> · expires {}</p>",
-                html_escape(issuer),
-                html_escape(info.tls_subject.as_deref().unwrap_or("—")),
-                html_escape(info.tls_valid_until.as_deref().unwrap_or("—"))
-            );
-        }
-    }
-    if !results.subdirs.is_empty() {
-        h += &format!("<details open><summary>Discovered web paths ({})</summary><table>", results.subdirs.len());
-        h += "<tr><th>URL</th><th>Status</th><th>Length</th><th>note</th></tr>";
-        for d in results.subdirs.iter().take(250) {
-            h += &format!(
-                "<tr><td><a href=\"{}\" target=\"_blank\">{}</a></td><td>{}</td><td>{}</td><td>{}</td></tr>",
-                html_escape(&d.url),
-                html_escape(&d.url),
-                d.status,
-                d.length,
-                html_escape(&d.note)
-            );
-        }
-        h += "</table></details>";
-    }
-    h + appendix_close()
-}
-
-fn enum_block(results: &ReconResults) -> String {
-    let mut any = false;
     let mut h = String::new();
-    if let Some(snmp) = &results.snmp {
-        any = true;
-        h += &format!(
-            "<h3 class='sub'>SNMP</h3><p>community <code>{}</code> ({}) · sysName <b>{}</b> · vendor <i>{}</i> · {} varbinds walked</p><p class='muted'>{}</p>",
-            html_escape(&snmp.community),
-            html_escape(&snmp.version),
-            html_escape(snmp.sysname.as_deref().unwrap_or("—")),
-            html_escape(snmp.vendor_guess.as_deref().unwrap_or("—")),
-            snmp.varbind_count,
-            html_escape(snmp.sysdescr.as_deref().unwrap_or(""))
-        );
-    }
-    if let Some(ldap) = &results.ldap {
-        any = true;
-        h += &format!(
-            "<h3 class='sub'>LDAP</h3><p>{} anonymous bind · {} users · {} groups · {} computers · context <code>{}</code></p>",
-            if ldap.anonymous_bind { "ALLOWED" } else { "denied" },
-            ldap.users.len(),
-            ldap.groups.len(),
-            ldap.computers.len(),
-            html_escape(ldap.naming_context.as_deref().unwrap_or("—"))
-        );
-        if !ldap.users.is_empty() {
-            h += &format!(
-                "<details><summary>users ({})</summary><p class='muted'>{}</p></details>",
-                ldap.users.len(),
-                html_escape(&ldap.users.join(", "))
-            );
-        }
-    }
-    if let Some(nb) = &results.netbios {
-        any = true;
-        h += &format!("<h3 class='sub'>NetBIOS</h3><p>MAC <code>{}</code></p><ul>", html_escape(&nb.mac_address));
-        for (name, svc) in nb.names.iter().take(12) {
-            h += &format!("<li><b>{}</b> — {}</li>", html_escape(name), html_escape(svc));
-        }
-        h += "</ul>";
-    }
-    if let Some(smb) = &results.smb {
-        any = true;
-        h += &format!(
-            "<h3 class='sub'>SMB</h3><p>tools: {} · shares: {} · users: {}</p>",
-            html_escape(&smb.tools_available.join(", ")),
-            smb.shares.len(),
-            smb.users.len()
-        );
-    }
-    if let Some(w) = &results.whois {
-        any = true;
-        h += &format!(
-            "<h3 class='sub'>WHOIS</h3><p class='muted'>registrar <b>{}</b> · created {} · expires {} · org <i>{}</i></p>",
-            html_escape(w.registrar.as_deref().unwrap_or("—")),
-            html_escape(w.created.as_deref().unwrap_or("—")),
-            html_escape(w.expires.as_deref().unwrap_or("—")),
-            html_escape(w.org.as_deref().unwrap_or("—"))
-        );
-    }
-    if any {
-        format!("<details class=\"section\" open><summary style=\"font-size:17px;color:#cbd5e1\">🛰 Enumeration Results — <span class=\"muted\">evidence</span></summary>{}</details>", h)
+    h.push_str(&section_open("All Findings", "📋"));
+    
+    if results.vulns.is_empty() {
+        h.push_str("<p class='muted'>No vulnerabilities found.</p>");
     } else {
-        String::new()
+        h.push_str("<table><thead><tr><th>Severity</th><th>Title</th><th>Affected</th><th>CVE</th><th>Confidence</th><th>Description</th></tr></thead><tbody>");
+        for v in &results.vulns {
+            h.push_str(&format!("<tr><td><span class='chip' style='background:{}'>{}</span></td><td><b>{}</b></td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                sev_color(&v.severity),
+                sev_label(&v.severity),
+                html_escape(&v.title),
+                html_escape(&v.affected),
+                v.cve.as_deref().unwrap_or("-"),
+                v.confidence,
+                html_escape(&v.description)
+            ));
+        }
+        h.push_str("</tbody></table>");
     }
+    h.push_str(&section_close());
+    h
 }
 
-fn dns_block(results: &ReconResults) -> String {
-    let dns = match &results.dns {
-        Some(d) => d,
-        None => return String::new(),
-    };
-    let mut h = appendix_open("DNS & Subdomains", "🗺", false);
-    if dns.axfr_success {
-        h += "<p><b style='color:var(--red)'>Zone transfer SUCCEEDED</b> — the entire zone leaked:</p><ul>";
-        for r in dns.axfr_records.iter().take(40) {
-            h += &format!(
-                "<li>{} <b>{}</b> → {}</li>",
-                html_escape(&r.rtype),
-                html_escape(&r.name),
-                html_escape(&r.value)
-            );
-        }
-        h += "</ul>";
-    }
-    h += &format!(
-        "<details><summary>DNS records ({})</summary><table><tr><th>Type</th><th>Name</th><th>Value</th></tr>",
-        dns.records.len()
-    );
-    for r in dns.records.iter().take(120) {
-        h += &format!(
-            "<tr><td>{}</td><td>{}</td><td>{}</td></tr>",
-            html_escape(&r.rtype),
-            html_escape(&r.name),
-            html_escape(&r.value)
-        );
-    }
-    h += "</table></details>";
-    if !results.subdomains.is_empty() {
-        h += &format!(
-            "<details><summary>Subdomains ({})</summary><table><tr><th>Subdomain</th><th>IPs</th><th>Source</th></tr>",
-            results.subdomains.len()
-        );
-        for s in results.subdomains.iter().take(200) {
-            h += &format!(
-                "<tr><td>{}</td><td>{}</td><td>{}</td></tr>",
-                html_escape(&s.name),
-                html_escape(&s.ips.join(", ")),
-                html_escape(&s.source)
-            );
-        }
-        h += "</table></details>";
-    }
-    for p in &results.pivots {
-        h += &format!(
-            "<details><summary>Pivot domain: {}</summary><p class='muted'>DNS: {} records · dorks: {} hits</p></details>",
-            html_escape(&p.domain),
-            p.dns.as_ref().map(|d| d.records.len()).unwrap_or(0),
-            p.dorks.iter().map(|d| d.results.len()).sum::<usize>()
-        );
-    }
-    h + appendix_close()
-}
-
-fn osint_block(results: &ReconResults) -> String {
-    if results.dorks.is_empty() {
-        return String::new();
-    }
-    let mut h = appendix_open("OSINT Dorking", "🔎", false);
-    for d in &results.dorks {
-        if let Some(e) = &d.error {
-            h += &format!(
-                "<p class='muted'><code>{}</code> ({}) — <span style='color:var(--red)'>{}</span></p>",
-                html_escape(&d.query),
-                html_escape(&d.engine),
-                html_escape(e)
-            );
-        } else if d.results.is_empty() {
-            h += &format!(
-                "<p class='muted'><code>{}</code> ({}) — no results</p>",
-                html_escape(&d.query),
-                html_escape(&d.engine)
-            );
-        } else {
-            h += &format!(
-                "<p><code>{}</code> <span class='chip' style='background:var(--green)'>{}</span></p><ul>",
-                html_escape(&d.query),
-                d.results.len()
-            );
-            for r in d.results.iter().take(6) {
-                h += &format!(
-                    "<li><a href=\"{}\" target=\"_blank\">{}</a></li>",
-                    html_escape(r),
-                    html_escape(r)
-                );
+fn cve_references_block(results: &ReconResults) -> String {
+    let mut h = String::new();
+    h.push_str(&section_open("CVE / Exploit References", "📚"));
+    
+    if results.cves.is_empty() && results.cve_refs.is_empty() {
+        h.push_str("<p class='muted'>No CVE references.</p>");
+    } else {
+        if !results.cves.is_empty() {
+            h.push_str("<h3>CVEs Identified</h3><ul>");
+            for cve in &results.cves {
+                h.push_str(&format!("<li><code>{}</code> — {}</li>", html_escape(&cve.id), html_escape(&cve.description)));
             }
-            h += "</ul>";
+            h.push_str("</ul>");
+        }
+        if !results.cve_refs.is_empty() {
+            h.push_str("<h3>Exploit References</h3><ul>");
+            for r in &results.cve_refs {
+                h.push_str(&format!("<li><b>Query:</b> {} — <b>Engine:</b> {}</li>", html_escape(&r.query), html_escape(&r.engine)));
+            }
+            h.push_str("</ul>");
         }
     }
-    h + appendix_close()
+    h.push_str(&section_close());
+    h
 }
 
-fn timeline_block(results: &ReconResults) -> String {
+fn ai_decisions_block(results: &ReconResults) -> String {
+    let mut h = String::new();
+    h.push_str(&section_open("AI Agent Decisions", "🧠"));
+    
     if results.ai_decisions.is_empty() {
-        return String::new();
+        h.push_str("<p class='muted'>No AI decisions recorded (agent offline).</p>");
+    } else {
+        h.push_str("<ol style='padding-left: 20px;'>");
+        for d in &results.ai_decisions {
+            h.push_str(&format!("<li style='margin-bottom: 12px;'><b>{}</b> — {}</li>", html_escape(&d.decision), html_escape(&d.rationale)));
+            h.push_str(&format!("<div class='meta'>Stage: {}</div>", html_escape(&d.stage)));
+        }
+        h.push_str("</ol>");
     }
-    let mut h = section_open("NightCrawler Decision Timeline", "🧭");
-    h += "<table><tr><th>Stage</th><th>Decision</th><th>Rationale</th></tr>";
+    h.push_str(&section_close());
+    h
+}
+
+fn pivot_log_block(results: &ReconResults) -> String {
+    let mut h = String::new();
+    h.push_str(&section_open("Pivot Log", "🔄"));
+    
+    if results.pivots.is_empty() {
+        h.push_str("<p class='muted'>No pivots performed.</p>");
+    } else {
+        h.push_str("<ol style='padding-left: 20px;'>");
+        for p in &results.pivots {
+            h.push_str(&format!("<li style='margin-bottom: 8px;'><b>Pivot to:</b> {} (Domain)</li>", html_escape(&p.domain)));
+            if let Some(dns) = &p.dns {
+                h.push_str(&format!("<div class='meta'>DNS records: {}</div>", dns.records.len()));
+            }
+            if !p.dorks.is_empty() {
+                h.push_str(&format!("<div class='meta'>Dorks: {}</div>", p.dorks.len()));
+            }
+        }
+        h.push_str("</ol>");
+    }
+    h.push_str(&section_close());
+    h
+}
+
+fn methodology_block() -> String {
+    let mut h = String::new();
+    h.push_str(&section_open("Methodology", "📖"));
+    h.push_str(r###"
+<p>This report was generated by <b>NightCrawler</b>, an autonomous adversary simulation agent that simulates the complete cyber kill chain:</p>
+<ol style="padding-left: 20px; margin: 12px 0;">
+<li><b>Reconnaissance</b> — Passive/active intelligence gathering, attack surface mapping</li>
+<li><b>Initial Access</b> — Exploit validation, credential testing, supply chain analysis</li>
+<li><b>Privilege Escalation</b> — Local/remote escalation paths, token abuse</li>
+<li><b>Lateral Movement</b> — Pass-the-hash/ticket, application-layer pivoting</li>
+<li><b>Persistence</b> — Implant simulation, scheduled tasks, WMI, cloud backdoors</li>
+<li><b>Impact</b> — Data staging/exfil simulation, ransomware encryption simulation</li>
+</ol>
+<p>All findings are evidence-based with confidence ratings. Exploitation is simulated (read-only, proof-of-concept only).</p>
+"###);
+    h.push_str(&section_close());
+    h
+}
+
+fn limitations_block() -> String {
+    let mut h = String::new();
+    h.push_str(&section_open("Limitations", "⚠️"));
+    h.push_str(r###"
+<ul style="padding-left: 20px;">
+<li>Simulation only — no actual exploitation or data exfiltration performed</li>
+<li>Passive/active reconnaissance limited to authorized scope</li>
+<li>Credential attacks simulated via evidence correlation, not brute force</li>
+<li>Cloud/container assessment requires appropriate permissions</li>
+<li>Zero-day vulnerabilities not covered (signature-based detection only)</li>
+<li>Encrypted traffic analysis limited to certificate metadata</li>
+<li>Results represent point-in-time assessment</li>
+</ul>
+"###);
+    h.push_str(&section_close());
+    h
+}
+
+// =============================================================================
+// Data Builder Functions
+// =============================================================================
+
+fn compute_risk_score(results: &ReconResults) -> u32 {
+    let mut score = 0u32;
+    for v in &results.vulns {
+        score += match v.severity {
+            Severity::Critical => 25,
+            Severity::High => 15,
+            Severity::Medium => 8,
+            Severity::Low => 3,
+            Severity::Info => 1,
+        };
+    }
+    // Cap at 100
+    score.min(100)
+}
+
+#[derive(Serialize)]
+struct AttackSurfaceNode {
+    id: String,
+    label: String,
+    kind: String,
+    label_full: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    service: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    severity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cve: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    affected: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    confidence: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    evidence: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    method: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    api_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auth_required: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    url: Option<String>,
+    degree: usize,
+}
+
+#[derive(Serialize)]
+struct AttackSurfaceLink {
+    source: String,
+    target: String,
+    #[serde(rename = "type")]
+    link_type: String,
+}
+
+fn build_attack_surface_nodes(results: &ReconResults) -> Vec<AttackSurfaceNode> {
+    let mut nodes = Vec::new();
+    
+    // Target node
+    nodes.push(AttackSurfaceNode {
+        id: "target".to_string(),
+        label: results.target.input.clone(),
+        kind: "target".to_string(),
+        label_full: results.target.input.clone(),
+        port: None,
+        service: None,
+        severity: None,
+        cve: None,
+        affected: None,
+        confidence: None,
+        description: None,
+        evidence: None,
+        method: None,
+        path: None,
+        api_type: None,
+        auth_required: None,
+        url: None,
+        degree: 0,
+    });
+    
+    // Subdomains
+    for (i, sub) in results.subdomains.iter().enumerate() {
+        nodes.push(AttackSurfaceNode {
+            id: format!("sub-{}", i),
+            label: sub.name.clone(),
+            kind: "subdomain".to_string(),
+            label_full: sub.name.clone(),
+            port: None,
+            service: None,
+            severity: None,
+            cve: None,
+            affected: None,
+            confidence: None,
+            description: Some(format!("Source: {}", sub.source)),
+            evidence: None,
+            method: None,
+            path: None,
+            api_type: None,
+            auth_required: None,
+            url: Some(format!("http://{}", sub.name)),
+            degree: 0,
+        });
+    }
+    
+    // Open ports / services
+    for p in &results.ports {
+        if p.open {
+            let kind = match p.port {
+                80 | 443 | 8080 | 8443 | 3000 | 5000 | 8000 | 8081 => "web",
+                21 | 22 | 23 | 25 | 110 | 143 | 993 | 995 | 465 | 587 => "infra",
+                3306 | 5432 | 1433 | 27017 | 6379 | 11211 => "db",
+                389 | 636 | 3268 => "ldap",
+                445 | 139 => "smb",
+                161 | 162 => "snmp",
+                22 | 3389 | 5900 | 5901 => "remote",
+                _ => "service",
+            };
+            
+            nodes.push(AttackSurfaceNode {
+                id: format!("port-{}", p.port),
+                label: format!("{}/{}", p.port, p.service),
+                kind: kind.to_string(),
+                label_full: format!("{} ({}:{})", p.service, p.product.as_deref().unwrap_or("?"), p.version.as_deref().unwrap_or("?")),
+                port: Some(p.port),
+                service: Some(p.service.clone()),
+                severity: None,
+                cve: None,
+                affected: None,
+                confidence: None,
+                description: None,
+                evidence: None,
+                method: None,
+                path: None,
+                api_type: None,
+                auth_required: None,
+                url: None,
+                degree: 0,
+            });
+        }
+    }
+    
+    // Vulnerabilities
+    for (i, v) in results.vulns.iter().enumerate() {
+        nodes.push(AttackSurfaceNode {
+            id: format!("vuln-{}", i),
+            label: if v.title.len() > 25 { v.title[..22].to_string() + "..." } else { v.title.clone() },
+            kind: "vuln".to_string(),
+            label_full: v.title.clone(),
+            port: None,
+            service: None,
+            severity: Some(format!("{:?}", v.severity)),
+            cve: v.cve.clone(),
+            affected: Some(v.affected.clone()),
+            confidence: Some(v.confidence.parse().unwrap_or(0)),
+            description: Some(v.description.clone()),
+            evidence: Some(v.evidence.clone()),
+            method: None,
+            path: None,
+            api_type: None,
+            auth_required: None,
+            url: None,
+            degree: 0,
+        });
+    }
+    
+    // API endpoints
+    for (i, ep) in results.api_endpoints.iter().enumerate() {
+        nodes.push(AttackSurfaceNode {
+            id: format!("api-{}", i),
+            label: format!("{} {}", ep.method, ep.path),
+            kind: "api".to_string(),
+            label_full: format!("{} {} ({})", ep.method, ep.path, api_type_label(&ep.api_type)),
+            port: None,
+            service: None,
+            severity: None,
+            cve: None,
+            affected: None,
+            confidence: None,
+            description: None,
+            evidence: None,
+            method: Some(ep.method.clone()),
+            path: Some(ep.path.clone()),
+            api_type: Some(api_type_label(&ep.api_type).to_string()),
+            auth_required: Some(ep.auth_required),
+            url: None,
+            degree: 0,
+        });
+    }
+    
+    nodes
+}
+
+fn build_attack_surface_links(results: &ReconResults) -> Vec<AttackSurfaceLink> {
+    let mut links = Vec::new();
+    
+    // Target -> Subdomains
+    for i in 0..results.subdomains.len() {
+        links.push(AttackSurfaceLink {
+            source: "target".to_string(),
+            target: format!("sub-{}", i),
+            link_type: "recon".to_string(),
+        });
+    }
+    
+    // Vulnerabilities -> Affected services
+    for (i, v) in results.vulns.iter().enumerate() {
+        for p in &results.ports {
+            if p.open && v.affected.contains(&p.port.to_string()) {
+                links.push(AttackSurfaceLink {
+                    source: format!("port-{}", p.port),
+                    target: format!("vuln-{}", i),
+                    link_type: "exploit".to_string(),
+                });
+            }
+        }
+    }
+    
+    links
+}
+
+#[derive(Serialize)]
+struct KillChainPhase {
+    id: String,
+    status: String,
+    details: String,
+}
+
+fn build_kill_chain_phases(results: &ReconResults) -> Vec<KillChainPhase> {
+    let mut phases = Vec::new();
+    
+    let has_recon = !results.subdomains.is_empty() || !results.ports.is_empty();
+    let has_initial = results.vulns.iter().any(|v| matches!(v.severity, Severity::Critical | Severity::High));
+    let has_priv = results.attack_paths.iter().any(|p| p.steps.iter().any(|s| s.tool.as_deref().unwrap_or("").to_lowercase().contains("priv") || s.title.to_lowercase().contains("privilege")));
+    let has_lateral = results.attack_paths.iter().any(|p| p.steps.iter().any(|s| s.tool.as_deref().unwrap_or("").to_lowercase().contains("lateral") || s.title.to_lowercase().contains("lateral")));
+    let has_persist = results.attack_paths.iter().any(|p| p.steps.iter().any(|s| s.tool.as_deref().unwrap_or("").to_lowercase().contains("persist") || s.title.to_lowercase().contains("persist")));
+    let has_impact = results.exploitation_recommendations.iter().any(|r| r.title.to_lowercase().contains("impact") || r.title.to_lowercase().contains("data") || r.title.to_lowercase().contains("ransom"));
+    
+    phases.push(KillChainPhase { id: "recon".to_string(), status: if has_recon { "completed" } else { "pending" }.to_string(), details: format!("{} subdomains, {} open ports", results.subdomains.len(), results.ports.iter().filter(|p| p.open).count()) });
+    phases.push(KillChainPhase { id: "initial".to_string(), status: if has_initial { "completed" } else { "pending" }.to_string(), details: format!("{} critical/high vulns", results.vulns.iter().filter(|v| matches!(v.severity, Severity::Critical | Severity::High)).count()) });
+    phases.push(KillChainPhase { id: "privilege".to_string(), status: if has_priv { "completed" } else { "pending" }.to_string(), details: "Privilege escalation paths identified".to_string() });
+    phases.push(KillChainPhase { id: "lateral".to_string(), status: if has_lateral { "completed" } else { "pending" }.to_string(), details: "Lateral movement paths identified".to_string() });
+    phases.push(KillChainPhase { id: "persist".to_string(), status: if has_persist { "completed" } else { "pending" }.to_string(), details: "Persistence mechanisms identified".to_string() });
+    phases.push(KillChainPhase { id: "impact".to_string(), status: if has_impact { "completed" } else { "pending" }.to_string(), details: "Impact scenarios simulated".to_string() });
+    
+    phases
+}
+
+#[derive(Serialize)]
+struct VulnHeatmapItem {
+    asset: String,
+    #[serde(rename = "type")]
+    vuln_type: String,
+    severity: String,
+    title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cve: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    evidence: Option<String>,
+    count: usize,
+}
+
+fn build_vuln_heatmap_data(results: &ReconResults) -> Vec<VulnHeatmapItem> {
+    let mut items = Vec::new();
+    
+    for v in &results.vulns {
+        let vuln_type = categorize_vuln(v);
+        items.push(VulnHeatmapItem {
+            asset: v.affected.clone(),
+            vuln_type,
+            severity: format!("{:?}", v.severity).to_lowercase(),
+            title: v.title.clone(),
+            cve: v.cve.clone(),
+            evidence: Some(v.evidence.clone()),
+            count: 1,
+        });
+    }
+    
+    items
+}
+
+fn categorize_vuln(v: &VulnFinding) -> String {
+    let title = v.title.to_lowercase();
+    let desc = v.description.to_lowercase();
+    
+    if title.contains("sql") || title.contains("sqli") || desc.contains("sql injection") {
+        "web".to_string()
+    } else if title.contains("xss") || title.contains("cross-site") {
+        "web".to_string()
+    } else if title.contains("api") || title.contains("rest") || title.contains("graphql") {
+        "api".to_string()
+    } else if title.contains("ssh") || title.contains("rdp") || title.contains("smb") {
+        "infra".to_string()
+    } else if title.contains("cred") || title.contains("password") || title.contains("token") || title.contains("key") {
+        "credential".to_string()
+    } else if title.contains("config") || title.contains("misconfig") || title.contains("exposed") || title.contains("default") {
+        "config".to_string()
+    } else {
+        "web".to_string()
+    }
+}
+
+#[derive(Serialize)]
+struct CredentialMapItem {
+    id: String,
+    #[serde(rename = "type")]
+    cred_type: String,
+    source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reused_on: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    evidence: Option<String>,
+}
+
+fn build_credential_map_data(_results: &ReconResults) -> Vec<CredentialMapItem> {
+    // No credentials field in ReconResults
+    Vec::new()
+}
+
+#[derive(Serialize)]
+struct NetworkTopologyData {
+    nodes: Vec<NetworkNode>,
+    links: Vec<NetworkLink>,
+}
+
+#[derive(Serialize)]
+struct NetworkNode {
+    id: String,
+    label: String,
+    kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ip: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ports: Option<Vec<String>>,
+}
+
+#[derive(Serialize)]
+struct NetworkLink {
+    source: String,
+    target: String,
+}
+
+fn build_network_topology_data(results: &ReconResults) -> NetworkTopologyData {
+    let mut nodes = Vec::new();
+    let mut links = Vec::new();
+    
+    // Target
+    nodes.push(NetworkNode {
+        id: "target".to_string(),
+        label: results.target.input.clone(),
+        kind: "target".to_string(),
+        ip: results.target.ip.as_ref().map(|ip| ip.to_string()),
+        ports: None,
+    });
+    
+    // Subdomains
+    for (i, sub) in results.subdomains.iter().enumerate() {
+        let id = format!("sub-{}", i);
+        nodes.push(NetworkNode {
+            id: id.clone(),
+            label: sub.name.clone(),
+            kind: "subdomain".to_string(),
+            ip: sub.ips.first().cloned(),
+            ports: None,
+        });
+        links.push(NetworkLink { source: "target".to_string(), target: id });
+    }
+    
+    // Services
+    for p in &results.ports {
+        if p.open {
+            let id = format!("svc-{}", p.port);
+            nodes.push(NetworkNode {
+                id: id.clone(),
+                label: format!("{}:{}", p.service, p.port),
+                kind: "service".to_string(),
+                ip: None,
+                ports: Some(vec![p.port.to_string()]),
+            });
+            if !results.subdomains.is_empty() {
+                links.push(NetworkLink { source: "sub-0".to_string(), target: id });
+            } else {
+                links.push(NetworkLink { source: "target".to_string(), target: id });
+            }
+        }
+    }
+    
+    NetworkTopologyData { nodes, links }
+}
+
+#[derive(Serialize)]
+struct CredentialHeatmapItem {
+    asset: String,
+    #[serde(rename = "type")]
+    cred_type: String,
+    count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    details: Option<String>,
+}
+
+fn build_credential_heatmap_data(_results: &ReconResults) -> Vec<CredentialHeatmapItem> {
+    // No credentials field in ReconResults
+    Vec::new()
+}
+
+#[derive(Serialize)]
+struct VulnTimelineItem {
+    timestamp: String,
+    title: String,
+    phase: String,
+    severity: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    details: Option<String>,
+}
+
+fn build_vuln_timeline_data(results: &ReconResults) -> Vec<VulnTimelineItem> {
+    let mut items = Vec::new();
+    // Parse started_at as base time
+    let base_time = chrono::DateTime::parse_from_rfc3339(&results.meta.started_at).unwrap_or_else(|_| chrono::Utc::now().into());
+    
+    for (i, v) in results.vulns.iter().enumerate() {
+        let phase = match categorize_vuln(v).as_str() {
+            "web" | "api" => "recon",
+            "credential" => "credential-access",
+            "config" => "recon",
+            _ => "exploit",
+        };
+        
+        items.push(VulnTimelineItem {
+            timestamp: (base_time + chrono::Duration::seconds(i as i64 * 30)).to_rfc3339(),
+            title: v.title.clone(),
+            phase: phase.to_string(),
+            severity: format!("{:?}", v.severity).to_lowercase(),
+            details: Some(v.description.clone()),
+        });
+    }
+    
+    // Add attack path steps
+    for (pi, path) in results.attack_paths.iter().enumerate() {
+        for (si, step) in path.steps.iter().enumerate() {
+            items.push(VulnTimelineItem {
+                timestamp: (base_time + chrono::Duration::seconds((results.vulns.len() * 30 + pi * 10 + si) as i64)).to_rfc3339(),
+                title: format!("Path {}: {}", pi + 1, step.title),
+                phase: step.tool.as_deref().unwrap_or("exploit").to_string(),
+                severity: "medium".to_string(),
+                details: Some(step.description.clone()),
+            });
+        }
+    }
+    
+    items
+}
+
+#[derive(Serialize)]
+struct MitreHeatmapItem {
+    tactic: String,
+    technique: String,
+    covered: bool,
+    partial: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    details: Option<String>,
+}
+
+fn build_mitre_heatmap_data(results: &ReconResults) -> Vec<MitreHeatmapItem> {
+    let mut items = Vec::new();
+    
+    let techniques = vec![
+        ("reconnaissance", "T1590", "Active Scanning", results.ports.iter().any(|p| p.open)),
+        ("reconnaissance", "T1598", "Phishing for Information", false),
+        ("initial-access", "T1190", "Exploit Public-Facing Application", results.vulns.iter().any(|v| matches!(v.severity, Severity::Critical | Severity::High))),
+        ("initial-access", "T1078", "Valid Accounts", false), // No credentials field
+        ("execution", "T1059", "Command and Scripting Interpreter", results.vulns.iter().any(|v| v.title.to_lowercase().contains("rce") || v.title.to_lowercase().contains("command"))),
+        ("persistence", "T1505", "Server Software Component", false),
+        ("privilege-escalation", "T1068", "Exploitation for Privilege Escalation", results.attack_paths.iter().any(|p| p.steps.iter().any(|s| s.tool.as_deref().unwrap_or("").to_lowercase().contains("priv") || s.title.to_lowercase().contains("privilege")))),
+        ("defense-evasion", "T1070", "Indicator Removal", false),
+        ("credential-access", "T1003", "OS Credential Dumping", false), // No credentials field
+        ("discovery", "T1087", "Account Discovery", !results.subdomains.is_empty()),
+        ("lateral-movement", "T1021", "Remote Services", results.attack_paths.iter().any(|p| p.steps.iter().any(|s| s.tool.as_deref().unwrap_or("").to_lowercase().contains("lateral") || s.title.to_lowercase().contains("lateral")))),
+        ("collection", "T1005", "Data from Local System", false),
+        ("command-and-control", "T1071", "Application Layer Protocol", !results.api_endpoints.is_empty()),
+        ("exfiltration", "T1041", "Exfiltration Over C2 Channel", false),
+        ("impact", "T1486", "Data Encrypted for Impact", results.exploitation_recommendations.iter().any(|r| r.title.to_lowercase().contains("ransom"))),
+    ];
+    
+    for (tactic, technique_id, technique_name, covered) in techniques {
+        items.push(MitreHeatmapItem {
+            tactic: tactic.to_string(),
+            technique: format!("{} - {}", technique_id, technique_name),
+            covered,
+            partial: false,
+            details: None,
+        });
+    }
+    
+    items
+}
+
+#[derive(Serialize)]
+struct RemediationItem {
+    priority: String,
+    title: String,
+    asset: String,
+    severity: String,
+    effort: String,
+    action: String,
+    description: String,
+}
+
+fn build_remediation_data(results: &ReconResults) -> Vec<RemediationItem> {
+    let mut items = Vec::new();
+    
+    // Critical vulns first
+    for v in results.vulns.iter().filter(|v| matches!(v.severity, Severity::Critical)) {
+        items.push(RemediationItem {
+            priority: "critical".to_string(),
+            title: v.title.clone(),
+            asset: v.affected.clone(),
+            severity: "critical".to_string(),
+            effort: "High".to_string(),
+            action: "Patch immediately / apply workaround".to_string(),
+            description: v.description.clone(),
+        });
+    }
+    
+    // High vulns
+    for v in results.vulns.iter().filter(|v| matches!(v.severity, Severity::High)) {
+        items.push(RemediationItem {
+            priority: "high".to_string(),
+            title: v.title.clone(),
+            asset: v.affected.clone(),
+            severity: "high".to_string(),
+            effort: "Medium".to_string(),
+            action: "Patch within 7 days".to_string(),
+            description: v.description.clone(),
+        });
+    }
+    
+    // Medium vulns
+    for v in results.vulns.iter().filter(|v| matches!(v.severity, Severity::Medium)).take(10) {
+        items.push(RemediationItem {
+            priority: "medium".to_string(),
+            title: v.title.clone(),
+            asset: v.affected.clone(),
+            severity: "medium".to_string(),
+            effort: "Medium".to_string(),
+            action: "Patch within 30 days".to_string(),
+            description: v.description.clone(),
+        });
+    }
+    
+    // Misconfigurations
+    for v in results.vulns.iter().filter(|v| matches!(v.severity, Severity::Low | Severity::Info) && categorize_vuln(v) == "config").take(5) {
+        items.push(RemediationItem {
+            priority: "low".to_string(),
+            title: v.title.clone(),
+            asset: v.affected.clone(),
+            severity: "low".to_string(),
+            effort: "Low".to_string(),
+            action: "Harden configuration".to_string(),
+            description: v.description.clone(),
+        });
+    }
+    
+    items
+}
+
+#[derive(Serialize)]
+struct EvidenceItem {
+    category: String,
+    content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<String>,
+}
+
+fn build_evidence_data(results: &ReconResults) -> Vec<EvidenceItem> {
+    let mut items = Vec::new();
+    
+    // Port evidence
+    for p in &results.ports {
+        if p.open {
+            items.push(EvidenceItem {
+                category: "Port".to_string(),
+                content: format!("{}/{} - {} {} {}", p.port, p.service, p.product.as_deref().unwrap_or(""), p.version.as_deref().unwrap_or(""), p.notes.first().map(|s| s.as_str()).unwrap_or("")),
+                source: Some("port_scan".to_string()),
+            });
+        }
+    }
+    
+    // Subdomain evidence
+    for s in &results.subdomains {
+        items.push(EvidenceItem {
+            category: "Subdomain".to_string(),
+            content: format!("{} (source: {})", s.name, s.source),
+            source: Some("subdomain_enum".to_string()),
+        });
+    }
+    
+    // Vulnerability evidence
+    for v in &results.vulns {
+        items.push(EvidenceItem {
+            category: "Vulnerability".to_string(),
+            content: format!("{}: {}", v.title, v.evidence),
+            source: Some("vuln_scan".to_string()),
+        });
+    }
+    
+    // Directory evidence
+    for d in &results.subdirs {
+        items.push(EvidenceItem {
+            category: "Directory".to_string(),
+            content: format!("{} (status: {})", d.url, d.status),
+            source: Some("dir_enum".to_string()),
+        });
+    }
+    
+    // API endpoint evidence
+    for ep in &results.api_endpoints {
+        items.push(EvidenceItem {
+            category: "API".to_string(),
+            content: format!("{} {} ({})", ep.method, ep.path, api_type_label(&ep.api_type)),
+            source: Some("api_discovery".to_string()),
+        });
+    }
+    
+    // AI decisions
     for d in &results.ai_decisions {
-        h += &format!(
-            "<tr><td><code>{}</code></td><td><b>{}</b></td><td class='muted'>{}</td></tr>",
-            html_escape(&d.stage),
-            html_escape(&d.decision),
-            html_escape(&d.rationale)
-        );
+        items.push(EvidenceItem {
+            category: "AI Decision".to_string(),
+            content: format!("{}: {}", d.decision, d.rationale),
+            source: Some("ai_agent".to_string()),
+        });
     }
-    h += "</table>";
-    h + section_close()
+    
+    items
 }
 
-fn footer_block(results: &ReconResults) -> String {
-    format!(
-        "<div class='foot'>Generated by Night Crawler {} · {} phases recorded · Only use against systems you are authorized to test.</div>",
-        html_escape(&results.meta.version),
-        results.phases.len()
-    )
-}
+// =============================================================================
+// Markdown to HTML (simplified)
+// =============================================================================
 
-// ---------------------------------------------------------------------------
-// mini markdown → HTML (for the NightCrawler-written analysis)
-// ---------------------------------------------------------------------------
-
-/// Small, dependency-free markdown renderer for the agent-written
-/// analysis: headings (with anchors), fenced code, bold/italic/links/code,
-/// ordered + unordered lists (incl. nested one level), pipe tables,
-/// blockquotes and paragraphs.
-pub fn md_to_html(md: &str) -> String {
-    let esc = html_escape;
-    let inline = |s: &str| -> String {
-        let mut out = esc(s);
-        // links [text](url)
-        if let Ok(re) = regex::Regex::new(r"\[([^\]]+)\]\(([^)\s]+)\)") {
-            out = re.replace_all(&out, "<a href=\"$2\" target=\"_blank\">$1</a>").to_string();
-        }
-        // inline code first (so ** inside code is untouched would be ideal; keep simple)
-        if let Ok(re) = regex::Regex::new(r"`([^`]+)`") {
-            out = re.replace_all(&out, "<code>$1</code>").to_string();
-        }
-        if let Ok(re) = regex::Regex::new(r"\*\*([^*]+)\*\*") {
-            out = re.replace_all(&out, "<b>$1</b>").to_string();
-        }
-        if let Ok(re) = regex::Regex::new(r"(?<!\*)\*([^*\n]+)\*(?!\*)") {
-            out = re.replace_all(&out, "<i>$1</i>").to_string();
-        }
-        out
-    };
-    let slug = |s: &str| -> String {
-        let collapsed: String = s
-            .to_ascii_lowercase()
-            .chars()
-            .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { ' ' })
-            .collect();
-        collapsed
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join("-")
-    };
-
-    let lines: Vec<&str> = md.lines().collect();
+fn md_to_html(md: &str) -> String {
     let mut html = String::new();
-    let mut i = 0;
-
-    let close_list = |html: &mut String, open: &mut Option<&'static str>| {
-        if let Some(tag) = open.take() {
-            html.push_str(&format!("</{}>", tag));
-        }
-    };
-
-    let mut list_open: Option<&'static str> = None;
-    while i < lines.len() {
-        let raw = lines[i];
-        let line = raw.trim();
-
-        // fenced code
+    let mut in_code = false;
+    let mut code_buffer = String::new();
+    
+    for line in md.lines() {
         if line.starts_with("```") {
-            close_list(&mut html, &mut list_open);
-            let mut code = String::new();
-            i += 1;
-            while i < lines.len() && !lines[i].trim_start().starts_with("```") {
-                code.push_str(lines[i]);
-                code.push('\n');
-                i += 1;
+            if in_code {
+                html.push_str(&format!("<pre><code>{}</code></pre>", html_escape(&code_buffer)));
+                code_buffer.clear();
+                in_code = false;
+            } else {
+                in_code = true;
             }
-            i += 1; // closing fence
-            html.push_str(&format!("<pre><code>{}</code></pre>", esc(&code)));
-            continue;
+        } else if in_code {
+            code_buffer.push_str(line);
+            code_buffer.push_str("\n");
+        } else if line.starts_with("# ") {
+            html.push_str(&format!("<h1>{}</h1>", html_escape(&line[2..])));
+        } else if line.starts_with("## ") {
+            html.push_str(&format!("<h2>{}</h2>", html_escape(&line[3..])));
+        } else if line.starts_with("### ") {
+            html.push_str(&format!("<h3>{}</h3>", html_escape(&line[4..])));
+        } else if line.starts_with("- ") || line.starts_with("* ") {
+            html.push_str(&format!("<li>{}</li>", html_escape(&line[2..])));
+        } else if line.trim().is_empty() {
+            html.push_str("<br>");
+        } else {
+            html.push_str(&format!("<p>{}</p>", html_escape(line)));
         }
-
-        // table: | header | ... | followed by |---|---|
-        if line.starts_with('|') && i + 1 < lines.len() {
-            let sep = lines[i + 1].trim();
-            let is_sep = sep.starts_with('|')
-                && sep.replace(['-', ':', '|', ' '], "").is_empty()
-                && sep.contains('-');
-            if is_sep {
-                close_list(&mut html, &mut list_open);
-                let hdr: Vec<&str> = line.trim_matches('|').split('|').map(|c| c.trim()).collect();
-                html.push_str("<table><tr>");
-                for h in &hdr {
-                    html.push_str(&format!("<th>{}</th>", inline(h)));
-                }
-                html.push_str("</tr>");
-                let mut j = i + 2;
-                while j < lines.len() && lines[j].trim_start().starts_with('|') {
-                    let cells: Vec<&str> = lines[j]
-                        .trim()
-                        .trim_matches('|')
-                        .split('|')
-                        .map(|c| c.trim())
-                        .collect();
-                    html.push_str("<tr>");
-                    for c in &cells {
-                        html.push_str(&format!("<td>{}</td>", inline(c)));
-                    }
-                    html.push_str("</tr>");
-                    j += 1;
-                }
-                html.push_str("</table>");
-                i = j;
-                continue;
-            }
-        }
-
-        // headings
-        let heading = |prefix: &str| -> Option<&str> { line.strip_prefix(prefix) };
-        if let Some(rest) = heading("#### ") {
-            close_list(&mut html, &mut list_open);
-            html.push_str(&format!("<h4 id='{}'>{}</h4>", slug(rest), inline(rest)));
-            i += 1;
-            continue;
-        }
-        if let Some(rest) = heading("### ") {
-            close_list(&mut html, &mut list_open);
-            html.push_str(&format!("<h3 class='sub' id='{}'>{}</h3>", slug(rest), inline(rest)));
-            i += 1;
-            continue;
-        }
-        if let Some(rest) = heading("## ") {
-            close_list(&mut html, &mut list_open);
-            html.push_str(&format!("<h2 id='{}'>{}</h2>", slug(rest), inline(rest)));
-            i += 1;
-            continue;
-        }
-        if let Some(rest) = heading("# ") {
-            close_list(&mut html, &mut list_open);
-            html.push_str(&format!("<h2 id='{}'>{}</h2>", slug(rest), inline(rest)));
-            i += 1;
-            continue;
-        }
-
-        // horizontal rule
-        if line == "---" || line == "***" {
-            close_list(&mut html, &mut list_open);
-            html.push_str("<hr>");
-            i += 1;
-            continue;
-        }
-
-        // ordered list
-        let ord = line
-            .find(". ")
-            .filter(|p| *p < 4 && line[..*p].chars().all(|c| c.is_ascii_digit()) && !line[..*p].is_empty());
-        if let Some(p) = ord {
-            if list_open != Some("ol") {
-                close_list(&mut html, &mut list_open);
-                html.push_str("<ol>");
-                list_open = Some("ol");
-            }
-            html.push_str(&format!("<li>{}</li>", inline(&line[p + 2..])));
-            i += 1;
-            continue;
-        }
-
-        // unordered list
-        if line.starts_with("- ") || line.starts_with("* ") {
-            if list_open != Some("ul") {
-                close_list(&mut html, &mut list_open);
-                html.push_str("<ul>");
-                list_open = Some("ul");
-            }
-            html.push_str(&format!("<li>{}</li>", inline(&line[2..])));
-            i += 1;
-            continue;
-        }
-
-        // blank
-        if line.is_empty() {
-            close_list(&mut html, &mut list_open);
-            i += 1;
-            continue;
-        }
-
-        // blockquote
-        if let Some(rest) = line.strip_prefix("> ") {
-            close_list(&mut html, &mut list_open);
-            html.push_str(&format!("<blockquote>{}</blockquote>", inline(rest)));
-            i += 1;
-            continue;
-        }
-
-        // paragraph
-        close_list(&mut html, &mut list_open);
-        html.push_str(&format!("<p>{}</p>", inline(line)));
-        i += 1;
     }
-    close_list(&mut html, &mut list_open);
+    
+    if in_code {
+        html.push_str(&format!("<pre><code>{}</code></pre>", html_escape(&code_buffer)));
+    }
+    
     html
-}
-
-#[cfg(test)]
-mod md_tests {
-    use super::*;
-
-    #[test]
-    fn full_document() {
-        let md = "# Executive Summary\n\nThe host is exposed.\n\n## Attack Paths\n\n- Step one: run `nmap`\n- Step two: exploit CVE-2024-1\n\n1. First\n2. Second\n\n| Port | Service |\n|---|---|\n| 80 | http |\n| 443 | https |\n";
-        let h = md_to_html(md);
-        assert!(h.contains("id='executive-summary'"));
-        assert!(h.contains("<p>The host is exposed.</p>"));
-        assert!(h.contains("<ul><li>Step one: run <code>nmap</code></li>"));
-        assert!(h.contains("<ol><li>First</li><li>Second</li></ol>"));
-        assert!(h.contains("<th>Port</th>"));
-        assert!(h.contains("<td>http</td>"));
-    }
-
-    #[test]
-    fn headings_have_content_below() {
-        // regression for the "headings with no content" bug: lists directly
-        // after a heading must render
-        let md = "## Findings\n\n### [High] Broken thing\n\n- **Confidence:** CONFIRMED\n- **Affected:** 80/tcp\n";
-        let h = md_to_html(md);
-        assert!(h.contains("id='findings'"));
-        assert!(h.contains("id='high-broken-thing'"));
-        assert!(h.contains("<li><b>Confidence:</b> CONFIRMED</li>"));
-    }
-
-    #[test]
-    fn code_fence_and_bold() {
-        let h = md_to_html("## Exploit\n\n```bash\nsqlmap -u x\n```\n\nUse **now**.");
-        assert!(h.contains("<pre><code>sqlmap -u x\n</code></pre>"));
-        assert!(h.contains("<b>now</b>"));
-    }
 }

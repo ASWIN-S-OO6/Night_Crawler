@@ -2,6 +2,7 @@
 //! traceroute path, and geo/ASN lookup — the details that fill the
 //! "Target / Host" section of the report.
 
+use crate::modules::geo::{self, enrich_traceroute};
 use crate::types::{GeoInfo, TargetInfo, TraceHop};
 use anyhow::Result;
 use std::time::Duration;
@@ -82,6 +83,10 @@ pub async fn geo_lookup(ip: &str) -> Option<GeoInfo> {
         isp: g("isp"),
         org: g("org"),
         asn: g("as"),
+        lat: v.get("lat").and_then(|x| x.as_f64()),
+        lon: v.get("lon").and_then(|x| x.as_f64()),
+        timezone: g("timezone"),
+        zip: g("zip"),
     })
 }
 
@@ -98,6 +103,8 @@ pub async fn enrich_target(target: &mut TargetInfo, open_ports: &[u16], ping_ttl
         // traceroute path (skip for localhost — meaningless)
         if !ip.is_loopback() {
             target.traceroute = traceroute(&ip.to_string()).await;
+            // enrich traceroute hops with geo data
+            let _ = enrich_traceroute(&mut target.traceroute).await;
         }
         // geo / ASN (skip private ranges — no public data)
         let is_private = match ip {
@@ -105,7 +112,7 @@ pub async fn enrich_target(target: &mut TargetInfo, open_ports: &[u16], ping_ttl
             std::net::IpAddr::V6(v6) => v6.is_loopback() || (v6.segments()[0] & 0xfe00) == 0xfc00,
         };
         if !ip.is_loopback() && !is_private {
-            target.geo = geo_lookup(&ip.to_string()).await;
+            target.geo = geo::geo_lookup(ip).await.ok();
         }
     }
     Ok(())

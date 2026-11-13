@@ -4,14 +4,16 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>🕷 Night Crawler — Live</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🕷</text></svg>">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
 <style>
 :root { --bg:#0a0e14; --panel:#111827; --border:#1f2b3d; --text:#e2e8f0;
   --muted:#8b9bb4; --accent:#d946ef; --cyan:#22d3ee; --green:#34d399;
-  --red:#f87171; --yellow:#fbbf24; }
+  --red:#f87171; --yellow:#fbbf24; --orange:#fb923c; }
 * { box-sizing:border-box; }
 body { margin:0; background:var(--bg); color:var(--text);
   font:14px/1.5 'Segoe UI',system-ui,sans-serif; }
-.wrap { max-width:1280px; margin:0 auto; padding:18px 20px 50px; }
+.wrap { max-width:1400px; margin:0 auto; padding:18px 20px 50px; }
 a { color:var(--cyan); text-decoration:none; }
 .header { background:linear-gradient(120deg,#1b0b23,#0a1a2e); border:1px solid #2c1f3d;
   border-radius:14px; padding:18px 22px; margin-bottom:16px;
@@ -22,8 +24,9 @@ a { color:var(--cyan); text-decoration:none; }
 .meta { display:flex; gap:16px; flex-wrap:wrap; font-size:13px; color:#b7c3d7; }
 .meta b { color:#fff; }
 .grid { display:grid; grid-template-columns:340px 1fr 1.2fr; gap:14px; margin-bottom:16px; }
-@media (max-width:1100px){ .grid{ grid-template-columns:1fr; } }
-.panel { background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:14px 16px; }
+@media (max-width:1200px){ .grid{ grid-template-columns:1fr 1fr; } }
+@media (max-width:900px){ .grid{ grid-template-columns:1fr; } }
+.panel { background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:14px 16px; display:flex; flex-direction:column; min-height:0; }
 .panel h2 { margin:0 0 10px; font-size:14px; text-transform:uppercase; letter-spacing:1px;
   color:#93a6c1; border-bottom:1px solid var(--border); padding-bottom:8px; }
 .phase { display:flex; gap:8px; padding:3px 0; font-size:13px; align-items:center; }
@@ -32,7 +35,7 @@ a { color:var(--cyan); text-decoration:none; }
 .done { color:var(--green); } .running { color:var(--accent); font-weight:600; }
 .skipped { color:var(--muted); } .failed { color:var(--red); } .pending { color:#4b5563; }
 .sum { color:var(--muted); font-size:11.5px; margin-left:2px; }
-.finding { padding:5px 0; border-bottom:1px solid #17202e; font-size:13px; }
+.finding { padding:5px 0; border-bottom:1px solid #17202e; font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .sev { display:inline-block; min-width:44px; text-align:center; border-radius:10px;
   font-size:10.5px; font-weight:700; padding:1px 6px; margin-right:8px; color:#0a0e14; }
 .CRIT { background:#ef4444; } .HIGH { background:#f97316; }
@@ -41,7 +44,7 @@ a { color:var(--cyan); text-decoration:none; }
 .task { display:flex; gap:8px; font-size:13px; padding:2px 0; }
 .reason { font-size:12.5px; color:#cbd5e1; padding:2px 0 2px 14px; border-left:2px solid #2c1f3d; margin:2px 0; }
 .reason::before { content:"» "; color:var(--muted); }
-.log { font-size:11.5px; color:var(--green); padding:1px 0; font-family:ui-monospace,monospace; }
+.log { font-size:11.5px; color:var(--green); padding:1px 0; font-family:ui-monospace,monospace; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .bar { position:sticky; top:8px; z-index:5; background:var(--panel); border:1px solid var(--border);
   border-radius:10px; padding:10px 16px; margin-bottom:16px; display:flex; gap:14px; align-items:center; flex-wrap:wrap; }
 .track { flex:1; height:12px; background:#0a0e14; border-radius:6px; overflow:hidden; min-width:200px; }
@@ -55,6 +58,9 @@ a { color:var(--cyan); text-decoration:none; }
 @keyframes spin { 0%{transform:rotate(0)} 100%{transform:rotate(360deg)} }
 .pulse { animation:pulse 1.6s ease infinite; }
 @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.45} }
+#geo-map { height: 220px; border-radius: 8px; margin: 8px 0; }
+.geo-info { font-size: 13px; line-height: 1.8; }
+.geo-info b { color: var(--cyan); }
 </style>
 </head>
 <body><div class="wrap">
@@ -93,20 +99,31 @@ a { color:var(--cyan); text-decoration:none; }
 </div>
 
 <div class="grid">
-  <div class="panel"><h2>Phases</h2><div id="phases"></div></div>
+  <div class="panel"><h2>Phases</h2><div id="phases" style="overflow-y:auto; flex:1;"></div></div>
   <div class="panel"><h2>🕷 NightCrawler Brain</h2>
     <div id="agent-state" class="agent-line">…</div>
-    <div id="tasks"></div>
-    <h2 style="margin-top:12px">Reasoning</h2><div id="reasoning"></div></div>
-  <div class="panel"><h2>Findings</h2><div id="findings"></div>
-    <h2 style="margin-top:12px">Activity</h2><div id="logs"></div></div>
+    <div id="tasks" style="flex:1; overflow-y:auto;"></div>
+    <h2 style="margin-top:12px">Reasoning</h2><div id="reasoning" style="flex:1; overflow-y:auto;"></div></div>
+  <div class="panel"><h2>Findings</h2><div id="findings" style="overflow-y:auto; flex:1;"></div>
+    <h2 style="margin-top:12px">Activity</h2><div id="logs" style="overflow-y:auto; flex:1;"></div></div>
 </div>
+
+<!-- Geo Location Panel -->
+<div class="panel" style="margin-top:16px; max-width:1200px;">
+  <h2>🌍 Target Geo Location</h2>
+  <div id="geo-map" style="height: 220px; border-radius: 8px; margin: 8px 0; background: #0a0e14; display: flex; align-items: center; justify-content: center; color: var(--muted);">Loading map…</div>
+  <div id="geo-info" class="geo-info"></div>
 </div>
 </div>
 
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
 <script>
 const SPIN = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏'];
 let spinI = 0;
+let map = null;
+let mapMarker = null;
+
 function icon(st) {
   if (st === 'done') return '✔';
   if (st === 'running') return `<span class="spinner">${SPIN[spinI % 10]}</span>`;
@@ -114,29 +131,111 @@ function icon(st) {
   if (st === 'failed') return '✖';
   return '◌';
 }
+
 function showSetup(show) {
   document.getElementById('setupbox').style.display = show ? 'block' : 'none';
   document.getElementById('mainview').style.display = show ? 'none' : 'block';
   document.getElementById('donebox').style.display = 'none';
 }
+
 async function startScan(ev) {
   ev.preventDefault();
   const target = document.getElementById('inp-target').value.trim();
   const provider = document.getElementById('inp-provider').value.trim();
   const msg = document.getElementById('setup-msg');
   msg.textContent = 'starting…';
-  await fetch('/start', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
+  
+  const response = await fetch('/start', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
     body: 'target=' + encodeURIComponent(target) + '&provider=' + encodeURIComponent(provider)});
-  showSetup(false);
-  startedAt = Date.now();
+  
+  if (!response.ok) {
+    const err = await response.text();
+    msg.textContent = 'Error: ' + err;
+    return false;
+  }
+  
+  // Wait for scan to actually start (poll /state until scan_started is true)
+  msg.textContent = 'waiting for scan to start…';
+  let attempts = 0;
+  while (attempts < 60) { // max 30 seconds
+    await new Promise(r => setTimeout(r, 500));
+    try {
+      const stateResp = await fetch('/state');
+      if (stateResp.ok) {
+        const s = await stateResp.json();
+        if (s.scan_started) {
+          console.log('[startScan] Scan started, hiding setup form');
+          showSetup(false);
+          startedAt = Date.now();
+          return false;
+        }
+      }
+    } catch (e) {
+      console.error('[startScan] Error polling state:', e);
+    }
+    attempts++;
+  }
+  
+  msg.textContent = 'Timeout waiting for scan to start';
+  console.error('[startScan] Timeout waiting for scan to start');
   return false;
 }
+
 let startedAt = null;
+
+function initMap(lat, lon, target, geo) {
+  if (map) return;
+  map = L.map('geo-map').setView([lat, lon], 10);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+  }).addTo(map);
+  
+  mapMarker = L.marker([lat, lon]).addTo(map);
+  const popupContent = '<b>Target:</b> ' + escapeHtml(target) + '<br>' +
+    '<b>City:</b> ' + escapeHtml(geo.city || 'Unknown') + '<br>' +
+    '<b>Region:</b> ' + escapeHtml(geo.region || 'Unknown') + '<br>' +
+    '<b>Country:</b> ' + escapeHtml(geo.country || 'Unknown') + '<br>' +
+    '<b>ISP:</b> ' + escapeHtml(geo.isp || 'Unknown') + '<br>' +
+    '<b>ASN:</b> ' + escapeHtml(geo.asn || 'Unknown');
+  mapMarker.bindPopup(popupContent).openPopup();
+}
+
+function updateGeoInfo(geo) {
+  const container = document.getElementById('geo-info');
+  if (!geo || !geo.city) {
+    container.innerHTML = '<span style="color:var(--muted)">No geo data available</span>';
+    return;
+  }
+  container.innerHTML = 
+    '<b>City:</b> ' + escapeHtml(geo.city) + '<br>' +
+    '<b>Region:</b> ' + escapeHtml(geo.region || 'Unknown') + '<br>' +
+    '<b>Country:</b> ' + escapeHtml(geo.country) + '<br>' +
+    '<b>ISP:</b> ' + escapeHtml(geo.isp || 'Unknown') + '<br>' +
+    '<b>Organization:</b> ' + escapeHtml(geo.org || 'Unknown') + '<br>' +
+    '<b>ASN:</b> ' + escapeHtml(geo.asn || 'Unknown') + '<br>' +
+    '<b>Timezone:</b> ' + escapeHtml(geo.timezone || 'Unknown') + '<br>' +
+    '<b>Coordinates:</b> ' + (geo.lat ? geo.lat.toFixed(4) + ', ' + geo.lon.toFixed(4) : 'Unknown');
+}
+
 async function tick() {
   spinI++;
   try {
-    const s = await (await fetch('/state')).json();
-    if (!s.scan_started) { showSetup(true); document.getElementById('model').textContent = 'waiting for target…'; return; }
+    console.log('[tick] Fetching /state...');
+    const response = await fetch('/state');
+    console.log('[tick] Response status:', response.status);
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
+    const s = await response.json();
+    console.log('[tick] State received:', s);
+    
+    if (!s.scan_started) { 
+      console.log('[tick] Scan not started, showing setup');
+      showSetup(true); 
+      document.getElementById('model').textContent = 'waiting for target…'; 
+      return; 
+    }
+    console.log('[tick] Scan started, updating UI');
     showSetup(false);
     document.getElementById('target').textContent = s.target || '—';
     document.getElementById('model').textContent = (s.model || 'agent offline').replace('🤖 ','');
@@ -146,46 +245,85 @@ async function tick() {
     document.getElementById('stats').innerHTML = st.join(' ');
 
     let doneN = 0;
+    let runningN = 0;
+    let failedN = 0;
     document.getElementById('phases').innerHTML = (s.phases || []).map(p => {
       if (p.status === 'done') doneN++;
+      else if (p.status === 'running') runningN++;
+      else if (p.status === 'failed') failedN++;
       const cls = p.status;
-      const extra = (p.status === 'skipped' || p.status === 'failed') && p.detail ? ` <span class="sum">(${p.detail})</span>` : '';
-      return `<div class="phase ${cls}"><span class="ic">${icon(p.status)}</span><span>${p.name}${p.summary ? `<span class="sum"> ${p.summary}</span>` : ''}${extra}</span></div>`;
+      const extra = (p.status === 'skipped' || p.status === 'failed') && p.detail ? ` <span class="sum">(${escapeHtml(p.detail)})</span>` : '';
+      return `<div class="phase ${cls}"><span class="ic">${icon(p.status)}</span><span>${escapeHtml(p.name)}${p.summary ? `<span class="sum"> ${escapeHtml(p.summary)}</span>` : ''}${extra}</span></div>`;
     }).join('');
     const total = Math.max((s.phases || []).length, 1);
-    const pct = Math.round(100 * doneN / total);
+    const pct = s.done ? 100 : Math.round(100 * doneN / total);
     const prog = s.progress;
     document.getElementById('fill').style.width = pct + '%';
     document.getElementById('pct').textContent = pct + '%';
-    const runningNow = (s.phases || []).filter(p => p.status === 'running').map(p => p.name).join(', ');
-    document.getElementById('phase-now').innerHTML = prog
-      ? `${icon('running')} ${prog.label} ${prog.current}/${prog.total}`
-      : (runningNow ? `${icon('running')} ${runningNow}` : (s.done ? 'complete' : 'working…'));
+    
+    let phaseNowHtml = '';
+    if (s.done) {
+      phaseNowHtml = '✔ complete';
+    } else if (prog) {
+      phaseNowHtml = `${icon('running')} ${escapeHtml(prog.label)} ${prog.current}/${prog.total}`;
+    } else {
+      const runningNow = (s.phases || []).filter(p => p.status === 'running').map(p => p.name).join(', ');
+      phaseNowHtml = runningNow ? `${icon('running')} ${escapeHtml(runningNow)}` : 'working…';
+    }
+    document.getElementById('phase-now').innerHTML = phaseNowHtml;
 
     document.getElementById('agent-state').innerHTML =
       s.thinking ? `<span class="thinking pulse">${icon('running')} NightCrawler is reasoning over the evidence…</span>`
                  : (s.done ? '✔ assessment complete' : '▶ acting');
     document.getElementById('tasks').innerHTML = (s.tasks || []).map(t =>
-      `<div class="task ${t.status}"><span class="ic">${icon(t.status)}</span>${t.name}</div>`).join('');
+      `<div class="task ${t.status}"><span class="ic">${icon(t.status)}</span>${escapeHtml(t.name)}</div>`).join('');
     document.getElementById('reasoning').innerHTML = (s.reasoning || []).slice(-10).map(r =>
-      `<div class="reason">${r}</div>`).join('');
+      `<div class="reason">${escapeHtml(r)}</div>`).join('');
 
     document.getElementById('findings').innerHTML = (s.findings || []).slice(-60).map(f =>
-      `<div class="finding"><span class="sev ${f.severity}">${f.severity}</span><b>${f.category}</b> ${escapeHtml(f.title)}</div>`).join('')
+      `<div class="finding"><span class="sev ${f.severity}">${f.severity}</span><b>${escapeHtml(f.category)}</b> ${escapeHtml(f.title)}</div>`).join('')
       || '<div class="finding">no findings yet…</div>';
     document.getElementById('logs').innerHTML = (s.logs || []).slice(-25).map(l =>
       `<div class="log">· ${escapeHtml(l)}</div>`).join('');
 
+    // Update geo map and info
+    if (s.target && s.target.geo) {
+      updateGeoInfo(s.target.geo);
+      if (s.target.geo.lat && s.target.geo.lon) {
+        initMap(s.target.geo.lat, s.target.geo.lon, s.target, s.target.geo);
+      }
+    }
+
     if (s.done) {
       document.getElementById('donebox').style.display = 'block';
+      // Force progress bar to 100%
+      document.getElementById('fill').style.width = '100%';
+      document.getElementById('pct').textContent = '100%';
       if (!window.openedReport) { window.openedReport = true; }
+      if (window.tickInterval) { clearInterval(window.tickInterval); window.tickInterval = null; }
     }
-  } catch (e) { /* server restarting between scans */ }
+  } catch (e) { 
+    console.error('tick error:', e);
+    // Show error in UI
+    const phaseNow = document.getElementById('phase-now');
+    if (phaseNow) {
+      phaseNow.innerHTML = `<span style="color:var(--red)">Error: ${escapeHtml(e.message || String(e))}</span>`;
+    }
+    // Show setup form if we can't get state
+    showSetup(true);
+  }
 }
+
 function escapeHtml(s) {
-  return (s || '').replace(/&/g,'&').replace(/</g,'<').replace(/>/g,'>');
+  return (s || '')
+    .replace(/&/g, '&')
+    .replace(/</g, '<')
+    .replace(/>/g, '>')
+    .replace(/"/g, '"')
+    .replace(/'/g, "'");
 }
+
 tick();
-setInterval(tick, 700);
+window.tickInterval = setInterval(tick, 700);
 </script>
 </body></html>

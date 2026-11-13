@@ -1,0 +1,72 @@
+{
+  "name": "nightcrawler",
+  "version": "0.1.0",
+  "build": {
+    "frontendDist": "../frontend/dist",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "tauri": {
+    "allowlist": {
+      "all": true,
+      "shell": {
+        "all": true,
+        "execute": true,
+        "sidecar": true
+      },
+      "fs": {
+        "all": true,
+        "readFile": true,
+        "writeFile": true,
+        "readDir": true,
+        "createDir": true
+      },
+      "fs": {
+        "all": true
+      },
+      "dialog": {
+        "all": true,
+        "open": true,
+        "save": true
+      },
+      "path": {
+        "all": true
+      },
+      "window": {
+        "all": true
+      },
+      "shell": {
+        "all": true,
+        "execute": true,
+        "sidecar": true
+      }
+    },
+    "windows": [
+      {
+        "title": "NightCrawler — Adversary Simulation",
+        "width": 1400,
+        "height": 900,
+        "minWidth": 1200,
+        "minHeight": 800,
+        "resizable": true,
+        "fullscreen": false,
+        "decorations": true
+      }
+    ],
+    "security": {
+      "csp": null
+    },
+    "bundle": {
+      "active": true,
+      "targets": "all",
+      "icon": [
+        "icons/32x32.png",
+        "icons/128x128.png",
+        "icons/128x128@2x.png",
+        "icons/icon.icns",
+        "icons/icon.ico"
+      ]
+    }
+  }
+}

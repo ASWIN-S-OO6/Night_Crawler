@@ -43,7 +43,7 @@ pub fn set_report_path(p: String) {
 const DASHBOARD: &str = include_str!("assets/dashboard.html");
 
 /// Serve the GUI until the process exits. Call from a spawned task.
-pub async fn serve(shared: Arc<SharedState>) -> anyhow::Result<()> {
+pub async fn serve(shared: Arc<SharedState>, ready: Option<tokio::sync::oneshot::Sender<()>>) -> anyhow::Result<()> {
     let port = gui_port();
     let listener = match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
         Ok(l) => l,
@@ -59,6 +59,11 @@ pub async fn serve(shared: Arc<SharedState>) -> anyhow::Result<()> {
     let bound = listener.local_addr()?.port();
     set_gui_port(bound);
     eprintln!("[*] GUI: http://127.0.0.1:{}", bound);
+
+    // Signal that the server is ready
+    if let Some(tx) = ready {
+        let _ = tx.send(());
+    }
 
     loop {
         let (mut sock, _) = listener.accept().await?;
@@ -121,6 +126,7 @@ async fn handle_conn(
             None => ("503 Service Unavailable", "text/plain", "report not ready".into()),
         },
         "/health" => ("200 OK", "application/json", "{\"ok\":true}".into()),
+        "/favicon.ico" => ("200 OK", "image/svg+xml", r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">🕷</text></svg>"#.to_string()),
         _ => ("404 Not Found", "text/plain", "not found".into()),
     };
 
@@ -206,6 +212,7 @@ fn snapshot_json(shared: &Arc<SharedState>) -> String {
         "reasoning": reasoning,
         "logs": logs,
         "error": s.error,
+        "geo": s.geo,
     })
     .to_string()
 }

@@ -79,6 +79,8 @@ pub struct AppState {
     pub next_finding_rev: u64,
     /// false while the GUI setup screen is waiting for a target
     pub scan_started: bool,
+    /// Geo IP location data for map display
+    pub geo: Option<crate::types::GeoInfo>,
 }
 
 impl AppState {
@@ -89,22 +91,25 @@ impl AppState {
             "NightCrawler Port Strategy",
             "Port Scan",
             "Service & Version Detection",
+            "Geo IP Location & Mapping",
             "Vulnerability Fingerprinting",
-            "CVE Mapping (NVD + CSE)",
+            "CVE Mapping (NVD + CSE + ExploitDB)",
             "NightCrawler Planning",
             "DNS Recon",
             "Zone Transfer (AXFR)",
             "Subdomain Enumeration",
             "Web & Directory Discovery",
+            "API Endpoint Discovery",
             "ZAP Web Scan",
             "SNMP Enumeration",
             "LDAP Enumeration",
             "NetBIOS / SMB Enumeration",
-            "WHOIS",
+            "WHOIS (RDAP + Legacy)",
             "OSINT Dorking",
             "NightCrawler Follow-up",
             "Pivot Domains",
             "Link Analysis",
+            "Attack Path Generation",
             "NightCrawler Analysis & Report",
             "Final Report",
         ]
@@ -133,6 +138,7 @@ impl AppState {
             agent_tasks: Vec::new(),
             next_finding_rev: 0,
             scan_started: false,
+            geo: None,
         }
     }
 
@@ -286,6 +292,13 @@ impl SharedState {
             if let Some(t) = s.agent_tasks.iter_mut().find(|t| t.name == name) {
                 t.status = status;
             }
+        });
+    }
+
+    /// Update geo location data for map display
+    pub fn set_geo(&self, geo: crate::types::GeoInfo) {
+        self.with(|s| {
+            s.geo = Some(geo);
         });
     }
 }

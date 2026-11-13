@@ -215,6 +215,15 @@ pub fn fingerprint(ports: &[PortResult], ip: IpAddr) -> Vec<VulnFinding> {
                 evidence: format!("banner: {}", pr.banner.as_deref().unwrap_or("(none)")),
                 description: rule.description.to_string(),
                 reference: rule.reference.map(|r| r.to_string()),
+                exploit_available: Some(rule.cve.is_some()),
+                exploit_sources: rule.cve.as_ref().map(|c| vec![format!("NVD:{}", c)]).unwrap_or_default(),
+                next_steps: Vec::new(),
+                remediation_priority: Some(match rule.severity {
+                    Severity::Critical => 1,
+                    Severity::High => 2,
+                    Severity::Medium => 3,
+                    _ => 5,
+                }),
             });
         }
     }
@@ -236,6 +245,10 @@ pub fn fingerprint(ports: &[PortResult], ip: IpAddr) -> Vec<VulnFinding> {
                 description: "r-services rely on host-based trust and transmit credentials in cleartext; trivially abused for lateral movement."
                     .into(),
                 reference: None,
+                exploit_available: Some(false),
+                exploit_sources: Vec::new(),
+                next_steps: vec!["Check for .rhosts files".into(), "Test rlogin/rsh access".into()],
+                remediation_priority: Some(2),
             });
         }
         if pr.port == 23 {
@@ -248,6 +261,10 @@ pub fn fingerprint(ports: &[PortResult], ip: IpAddr) -> Vec<VulnFinding> {
                 evidence: banner.clone(),
                 description: "Telnet sends credentials in cleartext and is a common initial-access vector. Replace with SSH.".into(),
                 reference: None,
+                exploit_available: Some(false),
+                exploit_sources: Vec::new(),
+                next_steps: vec!["Test telnet login".into(), "Capture credentials with tcpdump".into()],
+                remediation_priority: Some(2),
             });
         }
         if pr.port == 21 {
@@ -260,6 +277,10 @@ pub fn fingerprint(ports: &[PortResult], ip: IpAddr) -> Vec<VulnFinding> {
                 evidence: banner.clone(),
                 description: "FTP transmits credentials in cleartext; check for anonymous login and writable directories.".into(),
                 reference: None,
+                exploit_available: Some(false),
+                exploit_sources: Vec::new(),
+                next_steps: vec!["Test anonymous login".into(), "Check for writable directories".into()],
+                remediation_priority: Some(5),
             });
         }
         if matches!(pr.port, 3306 | 5432 | 1433 | 1521 | 27017 | 6379 | 9200 | 11211 | 5984 | 7000 | 7474) {
@@ -272,6 +293,10 @@ pub fn fingerprint(ports: &[PortResult], ip: IpAddr) -> Vec<VulnFinding> {
                 evidence: banner.clone(),
                 description: "A data-store service is reachable from the network perimeter. Verify authentication, network ACLs, and whether it should be internet-facing at all.".into(),
                 reference: None,
+                exploit_available: Some(false),
+                exploit_sources: Vec::new(),
+                next_steps: vec!["Test authentication".into(), "Check for default credentials".into()],
+                remediation_priority: Some(2),
             });
         }
         if matches!(pr.port, 5900 | 5901 | 5800 | 3389 | 3390) {
@@ -284,6 +309,10 @@ pub fn fingerprint(ports: &[PortResult], ip: IpAddr) -> Vec<VulnFinding> {
                 evidence: banner.clone(),
                 description: "Graphical remote access is exposed. Confirm MFA/NLA and rate-limiting; VNC without auth is a common foothold.".into(),
                 reference: None,
+                exploit_available: Some(false),
+                exploit_sources: Vec::new(),
+                next_steps: vec!["Test VNC/RDP authentication".into(), "Check for NLA".into()],
+                remediation_priority: Some(3),
             });
         }
         if pr.service == "redis" && banner.contains("responds to PING") {
@@ -297,6 +326,10 @@ pub fn fingerprint(ports: &[PortResult], ip: IpAddr) -> Vec<VulnFinding> {
                 description: "Redis answered PING without authentication (behaviorally CONFIRMED). Commonly abused for RCE via module load / CONFIG SET dir / ssh key writes / cron writes."
                     .into(),
                 reference: None,
+                exploit_available: Some(true),
+                exploit_sources: vec!["redis-rce".into(), "metasploit: exploit/linux/redis/redis_unauth_rce".into()],
+                next_steps: vec!["Test CONFIG SET dir".into(), "Write SSH key".into(), "Write cron job".into()],
+                remediation_priority: Some(1),
             });
         }
         if pr.port == 2375 {
@@ -309,6 +342,10 @@ pub fn fingerprint(ports: &[PortResult], ip: IpAddr) -> Vec<VulnFinding> {
                 evidence: banner.clone(),
                 description: "Unauthenticated Docker Engine API gives instant host takeover (docker -H tcp://host run -v /:/host privileged).".into(),
                 reference: None,
+                exploit_available: Some(true),
+                exploit_sources: vec!["docker CLI".into(), "metasploit: exploit/linux/docker/docker_daemon_privilege_escalation".into()],
+                next_steps: vec!["Run docker -H tcp://host run -v /:/host privileged".into()],
+                remediation_priority: Some(1),
             });
         }
         if pr.port == 6443 || (pr.port == 10250) {
@@ -322,6 +359,10 @@ pub fn fingerprint(ports: &[PortResult], ip: IpAddr) -> Vec<VulnFinding> {
                 description: "Kube-apiserver/kubelet ports are internet-reachable; check for anonymous auth and exec privileges (Kubelet 10250 read-only API is a classic node takeover)."
                     .into(),
                 reference: None,
+                exploit_available: Some(false),
+                exploit_sources: Vec::new(),
+                next_steps: vec!["Test anonymous auth on 6443".into(), "Test kubelet exec on 10250".into()],
+                remediation_priority: Some(2),
             });
         }
     }

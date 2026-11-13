@@ -138,7 +138,7 @@ pub fn resolve_nvidia_key(cli_key: Option<&str>, cfg: &Config) -> Option<String>
 }
 
 pub fn default_model() -> String {
-    std::env::var("NVIDIA_MODEL").unwrap_or_else(|_| "meta/llama-3.3-70b-instruct".to_string())
+    std::env::var("NVIDIA_MODEL").unwrap_or_else(|_| "nvidia/nemotron-3.5-lightning-30b-a3b".to_string())
 }
 
 pub fn default_base_url() -> String {

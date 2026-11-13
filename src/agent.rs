@@ -6,6 +6,7 @@
 //! persona and operating protocol for every call.
 
 use crate::ai::NvClient;
+use crate::types::{AttackPath, AttackStep, Severity};
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -297,4 +298,112 @@ mod tests {
         assert!(DOCTRINE.contains("How to Start the Attack"));
         assert!(DOCTRINE.contains("CONFIRMED"));
     }
+}
+
+// ---------------------------------------------------------------------------
+// Decision 4: Attack Path Generation (after link analysis)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttackStepPlan {
+    pub order: usize,
+    pub title: String,
+    pub description: String,
+    pub tool: Option<String>,
+    pub command: Option<String>,
+    pub expected_result: String,
+    pub evidence: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttackPathPlan {
+    pub name: String,
+    pub description: String,
+    pub steps: Vec<AttackStepPlan>,
+    pub severity: String,
+    pub confidence: String,
+    pub prerequisites: Vec<String>,
+    pub impact: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttackPathsResponse {
+    pub attack_paths: Vec<AttackPathPlan>,
+}
+
+pub async fn generate_attack_paths(client: &NvClient, snapshot: &Value) -> Result<Vec<AttackPath>> {
+    let task = r#"You are an offensive-security professional analyzing recon results to build concrete, actionable attack paths. The operator will use these to validate and exploit the target.
+
+Create up to 5 ordered attack paths. Each path must:
+1. Start from ACTUALLY FOUND services/vulnerabilities in the data
+2. Chain logically: initial access -> privilege escalation -> lateral movement -> impact
+3. Include specific tools/commands for each step
+4. Reference ONLY evidence from the provided results
+
+Allowed severity: Critical, High, Medium, Low, Info
+Confidence: CONFIRMED (behaviorally verified), LIKELY (version/CVE match), POSSIBLE (exposure), UNCONFIRMED (lead)
+
+JSON shape:
+{
+  "attack_paths": [
+    {
+      "name": "short descriptive name",
+      "description": "what this path achieves",
+      "steps": [
+        {
+          "order": 1,
+          "title": "step name",
+          "description": "what to do and why",
+          "tool": "tool name (e.g. nmap, sqlmap, msfconsole, hydra, custom script)",
+          "command": "exact command to run",
+          "expected_result": "what success looks like",
+          "evidence": ["specific finding titles/ports/CVEs from results that justify this step"]
+        }
+      ],
+      "severity": "High",
+      "confidence": "LIKELY",
+      "prerequisites": ["what must be true before starting"],
+      "impact": "confidentiality/integrity/availability impact"
+    }
+  ]
+}
+
+Only include paths that are actually supported by the evidence. If no viable path exists, return empty array."#;
+
+    let user = format!(
+        "RECON RESULTS SNAPSHOT:\n{}\n\nGenerate attack paths now.",
+        serde_json::to_string_pretty(snapshot)?
+    );
+
+    let json = chat_json(client, task, &user, 0.1, 4000).await?;
+    let parsed: AttackPathsResponse = serde_json::from_str(&json)
+        .with_context(|| format!("bad attack-paths JSON: {}", truncate(&json, 200)))?;
+
+    let mut paths = Vec::new();
+    for p in parsed.attack_paths {
+        paths.push(AttackPath {
+            name: p.name,
+            description: p.description,
+            steps: p.steps.into_iter().map(|s| AttackStep {
+                order: s.order,
+                title: s.title,
+                description: s.description,
+                tool: s.tool,
+                command: s.command,
+                expected_result: s.expected_result,
+                evidence: s.evidence,
+            }).collect(),
+            severity: match p.severity.as_str() {
+                "Critical" => Severity::Critical,
+                "High" => Severity::High,
+                "Medium" => Severity::Medium,
+                "Low" => Severity::Low,
+                _ => Severity::Info,
+            },
+            confidence: p.confidence,
+            prerequisites: p.prerequisites,
+            impact: p.impact,
+        });
+    }
+    Ok(paths)
 }
